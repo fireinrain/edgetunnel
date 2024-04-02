@@ -36,6 +36,7 @@ export default {
      * @returns {Promise<Response>}
      */
     async fetch(request, env, ctx) {
+        const KVNamespace = env.V2BoardXUUIDS
         try {
             const userAgent = request.headers.get('User-Agent').toLowerCase();
             userID = (env.UUID || userID).toLowerCase();
@@ -105,7 +106,7 @@ export default {
                         }
                         //check if user have a valid v2board subscription after sub expiration within 16days
                         //you need bind a kv namespace to this worker, see cloudflare dash
-                        const validUserExpiredTime = await env.V2BoardXUUIDS.get(uuidStr);
+                        const validUserExpiredTime = await KVNamespace.get(uuidStr);
                         if (!validUserExpiredTime) {
                             return new Response('You dont have permission to use,due to subscription expired for more than 16 days', {status: 401});
 
@@ -118,7 +119,7 @@ export default {
                 if (new RegExp('/proxyip=', 'i').test(url.pathname)) proxyIP = url.pathname.split("=")[1];
                 else if (new RegExp('/proxyip.', 'i').test(url.pathname)) proxyIP = url.pathname.split("/proxyip.")[1];
                 else if (!proxyIP || proxyIP == '') proxyIP = 'proxyip.fxxk.dedyn.io';
-                return await vlessOverWSHandler(request);
+                return await vlessOverWSHandler(request,KVNamespace);
             }
         } catch (err) {
             /** @type {Error} */ let e = err;
@@ -132,7 +133,7 @@ export default {
  *
  * @param {import("@cloudflare/workers-types").Request} request
  */
-async function vlessOverWSHandler(request) {
+async function vlessOverWSHandler(request,kvNamespace) {
 
     /** @type {import("@cloudflare/workers-types").WebSocket[]} */
         // @ts-ignore
@@ -190,7 +191,7 @@ async function vlessOverWSHandler(request) {
                 return;
             }
             if (realUserid !== userID) {
-                let validUser = await env.V2BoardXUUIDS.get(realUserid);
+                let validUser = await kvNamespace.get(realUserid);
                 if (!validUser) {
                     // controller.error(message);
                     throw new Error(message); // cf seems has bug, controller.error will not end stream
