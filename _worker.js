@@ -189,7 +189,7 @@ async function vlessOverWSHandler(request) {
                 // webSocket.close(1000, message);
                 return;
             }
-            if (reealUserid !== userID) {
+            if (realUserid !== userID) {
                 let validUser = await env.V2BoardXUUIDS.get(realUserid);
                 if (!validUser) {
                     // controller.error(message);
