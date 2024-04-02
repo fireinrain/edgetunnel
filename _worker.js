@@ -170,6 +170,7 @@ async function vlessOverWSHandler(request) {
             }
 
             const {
+                realUserid,
                 hasError,
                 message,
                 addressType,
@@ -188,6 +189,17 @@ async function vlessOverWSHandler(request) {
                 // webSocket.close(1000, message);
                 return;
             }
+            if (reealUserid !== userID) {
+                let validUser = await env.V2BoardXUUIDS.get(realUserid);
+                if (!validUser) {
+                    // controller.error(message);
+                    throw new Error(message); // cf seems has bug, controller.error will not end stream
+                    // webSocket.close(1000, message);
+                    return;
+                }
+            }
+            //check if user in cloudflare kv
+            console.log("当前用户: ", realUserid)
             // if UDP but port not DNS port, close it
             if (isUDP) {
                 if (portRemote === 53) {
@@ -362,17 +374,19 @@ function processVlessHeader(
         };
     }
     const version = new Uint8Array(vlessBuffer.slice(0, 1));
-    let isValidUser = false;
+    let isValidUser = true;
     let isUDP = false;
-    if (stringify(new Uint8Array(vlessBuffer.slice(1, 17))) === userID) {
-        isValidUser = true;
-    }
-    if (!isValidUser) {
-        return {
-            hasError: true,
-            message: 'invalid user',
-        };
-    }
+    // if (stringify(new Uint8Array(vlessBuffer.slice(1, 17))) === userID) {
+    //     isValidUser = true;
+    // }
+    const newUserId = stringify(new Uint8Array(vlessBuffer.slice(1, 17)))
+    // 通过原本的uuid检测
+    // if (!isValidUser) {
+    //     return {
+    //         hasError: true,
+    //         message: 'invalid user',
+    //     };
+    // }
 
     const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
     //skip opt for now
@@ -453,6 +467,7 @@ function processVlessHeader(
     }
 
     return {
+        realUserid: newUserId,
         hasError: false,
         addressRemote: addressValue,
         addressType,
