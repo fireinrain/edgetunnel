@@ -108,10 +108,10 @@ export default {
                         //you need bind a kv namespace to this worker, see cloudflare dash
                         const validUserExpiredTime = await KVNamespace.get(uuidStr);
                         if (!validUserExpiredTime) {
-                            return new Response('You dont have permission to use,due to subscription expired for more than 16 days', {status: 401});
+                            return new Response('You dont have permission to use,due to subscription expired for more than 12 days', {status: 401});
 
                         } else {
-                            return new Response('You are valid for subscription, just enjoin it :)', {status: 200})
+                            return new Response('You are valid for subscription, just enjoy it :)', {status: 200})
                         }
 
                 }
