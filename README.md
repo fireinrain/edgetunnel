@@ -8,3 +8,4 @@ UUID     这里是UUID
 PROXYIP  就是反代CF的IP
 SOCKS5   作用和反代CFIP类似，主要用于访问在CF上的网站
 UserIdAPI UUID检测api，用于判断uuid是否是来自v2boardx面板
+ApiAuthTOKEN 请求UserIdAPI 的auth token

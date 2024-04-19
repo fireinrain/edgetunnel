@@ -13,6 +13,7 @@ let parsedSocks5Address = {};
 let enableSocks = false;
 // the api to check if a user is allowed to connect
 let checkUserIdApi = ''
+let apiAuthToken = '';
 
 if (!isValidUUID(userID)) {
     throw new Error('uuid is not valid');
@@ -21,7 +22,7 @@ if (!isValidUUID(userID)) {
 export default {
     /**
      * @param {import("@cloudflare/workers-types").Request} request
-     * @param {{UUID: string, PROXYIP: string,SOCKS5: string,UserIdAPI :string}} env
+     * @param {{UUID: string, PROXYIP: string,SOCKS5: string,UserIdAPI :string,ApiAuthTOKEN: string}} env
      * @param {import("@cloudflare/workers-types").ExecutionContext} ctx
      * @returns {Promise<Response>}
      */
@@ -31,6 +32,7 @@ export default {
             proxyIP = env.PROXYIP || proxyIP;
             socks5Address = env.SOCKS5 || socks5Address;
             checkUserIdApi = env.UserIdAPI || checkUserIdApi;
+            apiAuthToken = env.ApiAuthTOKEN || apiAuthToken;
             if (socks5Address) {
                 try {
                     parsedSocks5Address = socks5AddressParser(socks5Address);
@@ -326,8 +328,14 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
  */
 async function checkUserIdValid(realUserId) {
     let apiUrl = `${checkUserIdApi}/api/v1/${realUserId}`
+    let params = {
+        method: 'GET',
+        headers: {
+            'Authorization': `${apiAuthToken}`
+        }
+    }
     try {
-        const response =  await fetch(apiUrl);
+        const response =  await fetch(apiUrl,params);
         if (response.status === 200) {
             return true;
         } else {
