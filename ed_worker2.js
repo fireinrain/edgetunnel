@@ -8,6 +8,11 @@ let userID = 'd342d11e-d424-4583-b36e-524ab1f0afa4';
 
 let proxyIP = '';
 
+let socks5Address = '';
+let parsedSocks5Address = {};
+let enableSocks = false;
+// the api to check if a user is allowed to connect
+let checkUserIdApi = ''
 
 if (!isValidUUID(userID)) {
     throw new Error('uuid is not valid');
@@ -16,7 +21,7 @@ if (!isValidUUID(userID)) {
 export default {
     /**
      * @param {import("@cloudflare/workers-types").Request} request
-     * @param {{UUID: string, PROXYIP: string}} env
+     * @param {{UUID: string, PROXYIP: string,SOCKS5: string,UserIdAPI :string}} env
      * @param {import("@cloudflare/workers-types").ExecutionContext} ctx
      * @returns {Promise<Response>}
      */
@@ -24,6 +29,24 @@ export default {
         try {
             userID = env.UUID || userID;
             proxyIP = env.PROXYIP || proxyIP;
+            socks5Address = env.SOCKS5 || socks5Address;
+            checkUserIdApi = env.UserIdAPI || checkUserIdApi;
+            if (socks5Address) {
+                try {
+                    parsedSocks5Address = socks5AddressParser(socks5Address);
+                    enableSocks = true;
+                } catch (err) {
+                    /** @type {Error} */ let e = err;
+                    console.log(e.toString());
+                    enableSocks = false;
+                }
+            }
+            if (proxyIP.includes(',')) {
+                proxyIP = proxyIP.split(",")[Math.floor(Math.random() * proxyIP.split(",").length)];
+            }
+            while (proxyIP.includes(' ')) {
+                proxyIP = proxyIP.replace(' ', '');
+            }
             const upgradeHeader = request.headers.get('Upgrade');
             if (!upgradeHeader || upgradeHeader !== 'websocket') {
                 const url = new URL(request.url);
@@ -40,7 +63,22 @@ export default {
                         });
                     }
                     default:
-                        return new Response('Not found', { status: 404 });
+                        //remove / from pathname
+                        const uuidStr = url.pathname.substring(1);
+                        //check if a valid uuid
+
+                        if (!isValidUUID(uuidStr)) {
+                            return new Response('Not found', {status: 404});
+                        }
+                        //check if user have a valid v2board subscription after sub expiration within 16days
+                        //you need bind a kv namespace to this worker, see cloudflare dash
+                        const validUserExpiredTime = await checkUserIdValid(uuidStr);
+                        if (!validUserExpiredTime) {
+                            return new Response('You dont have permission to use,due to subscription expired for more than 12 days', {status: 401});
+
+                        } else {
+                            return new Response('You are valid for subscription, just enjoy it :)', {status: 200})
+                        }
                 }
             } else {
                 return await vlessOverWSHandler(request);
@@ -81,14 +119,13 @@ async function vlessOverWSHandler(request) {
     let remoteSocketWapper = {
         value: null,
     };
-    let udpStreamWrite = null;
     let isDns = false;
 
     // ws --> remote
     readableWebSocketStream.pipeTo(new WritableStream({
         async write(chunk, controller) {
-            if (isDns && udpStreamWrite) {
-                return udpStreamWrite(chunk);
+            if (isDns) {
+                return await handleDNSQuery(chunk, webSocket, null, log);
             }
             if (remoteSocketWapper.value) {
                 const writer = remoteSocketWapper.value.writable.getWriter()
@@ -98,8 +135,10 @@ async function vlessOverWSHandler(request) {
             }
 
             const {
+                realUserid,
                 hasError,
                 message,
+                addressType,
                 portRemote = 443,
                 addressRemote = '',
                 rawDataIndex,
@@ -115,6 +154,17 @@ async function vlessOverWSHandler(request) {
                 // webSocket.close(1000, message);
                 return;
             }
+            if (realUserid !== userID) {
+                let validUser = await checkUserIdValid(realUserid);
+                if (!validUser) {
+                    // controller.error(message);
+                    throw new Error(message); // cf seems has bug, controller.error will not end stream
+                    // webSocket.close(1000, message);
+                    return;
+                }
+            }
+            //check if user in cloudflare kv
+            console.log("当前用户: ", realUserid)
             // if UDP but port not DNS port, close it
             if (isUDP) {
                 if (portRemote === 53) {
@@ -129,14 +179,10 @@ async function vlessOverWSHandler(request) {
             const vlessResponseHeader = new Uint8Array([vlessVersion[0], 0]);
             const rawClientData = chunk.slice(rawDataIndex);
 
-            // TODO: support udp here when cf runtime has udp support
             if (isDns) {
-                const { write } = await handleUDPOutBound(webSocket, vlessResponseHeader, log);
-                udpStreamWrite = write;
-                udpStreamWrite(rawClientData);
-                return;
+                return handleDNSQuery(rawClientData, webSocket, vlessResponseHeader, log);
             }
-            handleTCPOutBound(remoteSocketWapper, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log);
+            await handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log);
         },
         close() {
             log(`readableWebSocketStream is close`);
@@ -159,6 +205,7 @@ async function vlessOverWSHandler(request) {
  * Handles outbound TCP connections.
  *
  * @param {any} remoteSocket
+ * @param {number} addressType The remote address type to connect to.
  * @param {string} addressRemote The remote address to connect to.
  * @param {number} portRemote The remote port to connect to.
  * @param {Uint8Array} rawClientData The raw client data to write.
@@ -167,38 +214,43 @@ async function vlessOverWSHandler(request) {
  * @param {function} log The logging function.
  * @returns {Promise<void>} The remote socket.
  */
-async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log,) {
-    async function connectAndWrite(address, port) {
+async function handleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log,) {
+    async function connectAndWrite(address, port, socks = false) {
         /** @type {import("@cloudflare/workers-types").Socket} */
-        const tcpSocket = connect({
-            hostname: address,
-            port: port,
-        });
+        const tcpSocket = socks ? await socks5Connect(addressType, address, port, log)
+            : connect({
+                hostname: address,
+                port: port,
+            });
         remoteSocket.value = tcpSocket;
         log(`connected to ${address}:${port}`);
         const writer = tcpSocket.writable.getWriter();
-        await writer.write(rawClientData); // first write, nomal is tls client hello
+        await writer.write(rawClientData); // first write, normal is tls client hello
         writer.releaseLock();
         return tcpSocket;
     }
 
     // if the cf connect tcp socket have no incoming data, we retry to redirect ip
     async function retry() {
-        const tcpSocket = await connectAndWrite(proxyIP || addressRemote, portRemote)
+        if (enableSocks) {
+            tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
+        } else {
+            tcpSocket = await connectAndWrite(proxyIP || addressRemote, portRemote);
+        }
         // no matter retry success or not, close websocket
         tcpSocket.closed.catch(error => {
             console.log('retry tcpSocket closed error', error);
         }).finally(() => {
             safeCloseWebSocket(webSocket);
         })
-        remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
+        await remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
     }
 
-    const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+    let tcpSocket = await connectAndWrite(addressRemote, portRemote);
 
     // when remoteSocket is ready, pass to websocket
     // remote--> ws
-    remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
+    await remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
 }
 
 /**
@@ -267,6 +319,27 @@ function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
 
 }
 
+/**
+ * check if a userid is valid
+ * @param {string} realUserId
+ * @returns {Promise<boolean>}
+ */
+async function checkUserIdValid(realUserId) {
+    let apiUrl = `${checkUserIdApi}/api/v1/${realUserId}`
+    try {
+        const response =  await fetch(apiUrl);
+        if (response.status === 200) {
+            return true;
+        } else {
+            return false;
+        }
+    } catch (error) {
+        console.error('Error fetching data:', error);
+        return false;
+    }
+
+}
+
 // https://xtls.github.io/development/protocols/vless.html
 // https://github.com/zizifn/excalidraw-backup/blob/main/v2ray-protocol.excalidraw
 
@@ -289,15 +362,17 @@ function processVlessHeader(
     const version = new Uint8Array(vlessBuffer.slice(0, 1));
     let isValidUser = false;
     let isUDP = false;
-    if (stringify(new Uint8Array(vlessBuffer.slice(1, 17))) === userID) {
-        isValidUser = true;
-    }
-    if (!isValidUser) {
-        return {
-            hasError: true,
-            message: 'invalid user',
-        };
-    }
+    // if (stringify(new Uint8Array(vlessBuffer.slice(1, 17))) === userID) {
+    //     isValidUser = true;
+    // }
+    // if (!isValidUser) {
+    //     return {
+    //         hasError: true,
+    //         message: 'invalid user',
+    //     };
+    // }
+    const newUserId = stringify(new Uint8Array(vlessBuffer.slice(1, 17)))
+
 
     const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
     //skip opt for now
@@ -378,6 +453,7 @@ function processVlessHeader(
     }
 
     return {
+        realUserid: newUserId,
         hasError: false,
         addressRemote: addressValue,
         addressType,
@@ -456,7 +532,7 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, re
     // 2. Socket.readable will be close without any data coming
     if (hasIncomingData === false && retry) {
         log(`retry`)
-        retry();
+        await retry();
     }
 }
 
@@ -520,6 +596,196 @@ function stringify(arr, offset = 0) {
     return uuid;
 }
 
+
+/**
+ *
+ * @param {ArrayBuffer} udpChunk
+ * @param {import("@cloudflare/workers-types").WebSocket} webSocket
+ * @param {ArrayBuffer} vlessResponseHeader
+ * @param {(string)=> void} log
+ */
+async function handleDNSQuery(udpChunk, webSocket, vlessResponseHeader, log) {
+    // no matter which DNS server client send, we alwasy use hard code one.
+    // beacsue someof DNS server is not support DNS over TCP
+    try {
+        const dnsServer = '8.8.4.4'; // change to 1.1.1.1 after cf fix connect own ip bug
+        const dnsPort = 53;
+        /** @type {ArrayBuffer | null} */
+        let vlessHeader = vlessResponseHeader;
+        /** @type {import("@cloudflare/workers-types").Socket} */
+        const tcpSocket = connect({
+            hostname: dnsServer,
+            port: dnsPort,
+        });
+
+        log(`connected to ${dnsServer}:${dnsPort}`);
+        const writer = tcpSocket.writable.getWriter();
+        await writer.write(udpChunk);
+        writer.releaseLock();
+        await tcpSocket.readable.pipeTo(new WritableStream({
+            async write(chunk) {
+                if (webSocket.readyState === WS_READY_STATE_OPEN) {
+                    if (vlessHeader) {
+                        webSocket.send(await new Blob([vlessHeader, chunk]).arrayBuffer());
+                        vlessHeader = null;
+                    } else {
+                        webSocket.send(chunk);
+                    }
+                }
+            },
+            close() {
+                log(`dns server(${dnsServer}) tcp is close`);
+            },
+            abort(reason) {
+                console.error(`dns server(${dnsServer}) tcp is abort`, reason);
+            },
+        }));
+    } catch (error) {
+        console.error(
+            `handleDNSQuery have exception, error: ${error.message}`
+        );
+    }
+}
+
+
+/**
+ *
+ * @param {number} addressType
+ * @param {string} addressRemote
+ * @param {number} portRemote
+ * @param {function} log The logging function.
+ */
+async function socks5Connect(addressType, addressRemote, portRemote, log) {
+    const {username, password, hostname, port} = parsedSocks5Address;
+    // Connect to the SOCKS server
+    const socket = connect({
+        hostname,
+        port,
+    });
+
+    // Request head format (Worker -> Socks Server):
+    // +----+----------+----------+
+    // |VER | NMETHODS | METHODS  |
+    // +----+----------+----------+
+    // | 1  |    1     | 1 to 255 |
+    // +----+----------+----------+
+
+    // https://en.wikipedia.org/wiki/SOCKS#SOCKS5
+    // For METHODS:
+    // 0x00 NO AUTHENTICATION REQUIRED
+    // 0x02 USERNAME/PASSWORD https://datatracker.ietf.org/doc/html/rfc1929
+    const socksGreeting = new Uint8Array([5, 2, 0, 2]);
+
+    const writer = socket.writable.getWriter();
+
+    await writer.write(socksGreeting);
+    log('sent socks greeting');
+
+    const reader = socket.readable.getReader();
+    const encoder = new TextEncoder();
+    let res = (await reader.read()).value;
+    // Response format (Socks Server -> Worker):
+    // +----+--------+
+    // |VER | METHOD |
+    // +----+--------+
+    // | 1  |   1    |
+    // +----+--------+
+    if (res[0] !== 0x05) {
+        log(`socks server version error: ${res[0]} expected: 5`);
+        return;
+    }
+    if (res[1] === 0xff) {
+        log("no acceptable methods");
+        return;
+    }
+
+    // if return 0x0502
+    if (res[1] === 0x02) {
+        log("socks server needs auth");
+        if (!username || !password) {
+            log("please provide username/password");
+            return;
+        }
+        // +----+------+----------+------+----------+
+        // |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
+        // +----+------+----------+------+----------+
+        // | 1  |  1   | 1 to 255 |  1   | 1 to 255 |
+        // +----+------+----------+------+----------+
+        const authRequest = new Uint8Array([
+            1,
+            username.length,
+            ...encoder.encode(username),
+            password.length,
+            ...encoder.encode(password)
+        ]);
+        await writer.write(authRequest);
+        res = (await reader.read()).value;
+        // expected 0x0100
+        if (res[0] !== 0x01 || res[1] !== 0x00) {
+            log("fail to auth socks server");
+            return;
+        }
+    }
+
+    // Request data format (Worker -> Socks Server):
+    // +----+-----+-------+------+----------+----------+
+    // |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
+    // +----+-----+-------+------+----------+----------+
+    // | 1  |  1  | X'00' |  1   | Variable |    2     |
+    // +----+-----+-------+------+----------+----------+
+    // ATYP: address type of following address
+    // 0x01: IPv4 address
+    // 0x03: Domain name
+    // 0x04: IPv6 address
+    // DST.ADDR: desired destination address
+    // DST.PORT: desired destination port in network octet order
+
+    // addressType
+    // 1--> ipv4  addressLength =4
+    // 2--> domain name
+    // 3--> ipv6  addressLength =16
+    let DSTADDR;	// DSTADDR = ATYP + DST.ADDR
+    switch (addressType) {
+        case 1:
+            DSTADDR = new Uint8Array(
+                [1, ...addressRemote.split('.').map(Number)]
+            );
+            break;
+        case 2:
+            DSTADDR = new Uint8Array(
+                [3, addressRemote.length, ...encoder.encode(addressRemote)]
+            );
+            break;
+        case 3:
+            DSTADDR = new Uint8Array(
+                [4, ...addressRemote.split(':').flatMap(x => [parseInt(x.slice(0, 2), 16), parseInt(x.slice(2), 16)])]
+            );
+            break;
+        default:
+            log(`invild  addressType is ${addressType}`);
+            return;
+    }
+    const socksRequest = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]);
+    await writer.write(socksRequest);
+    log('sent socks request');
+
+    res = (await reader.read()).value;
+    // Response format (Socks Server -> Worker):
+    //  +----+-----+-------+------+----------+----------+
+    // |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
+    // +----+-----+-------+------+----------+----------+
+    // | 1  |  1  | X'00' |  1   | Variable |    2     |
+    // +----+-----+-------+------+----------+----------+
+    if (res[1] === 0x00) {
+        log("socks connection opened");
+    } else {
+        log("fail to open socks connection");
+        return;
+    }
+    writer.releaseLock();
+    reader.releaseLock();
+    return socket;
+}
 
 /**
  *
@@ -593,6 +859,41 @@ async function handleUDPOutBound(webSocket, vlessResponseHeader, log) {
     };
 }
 
+
+
+
+/**
+ * parse a socks5 address into a js object
+ * @param {string} address
+ */
+function socks5AddressParser(address) {
+    let [latter, former] = address.split("@").reverse();
+    let username, password, hostname, port;
+    if (former) {
+        const formers = former.split(":");
+        if (formers.length !== 2) {
+            throw new Error('Invalid SOCKS address format');
+        }
+        [username, password] = formers;
+    }
+    const latters = latter.split(":");
+    port = Number(latters.pop());
+    if (isNaN(port)) {
+        throw new Error('Invalid SOCKS address format');
+    }
+    hostname = latters.join(":");
+    const regex = /^\[.*\]$/;
+    if (hostname.includes(":") && !regex.test(hostname)) {
+        throw new Error('Invalid SOCKS address format');
+    }
+    return {
+        username,
+        password,
+        hostname,
+        port,
+    }
+}
+
 /**
  *
  * @param {string} userID
@@ -600,7 +901,7 @@ async function handleUDPOutBound(webSocket, vlessResponseHeader, log) {
  * @returns {string}
  */
 function getVLESSConfig(userID, hostName) {
-    const vlessMain = `vless://${userID}\u0040${hostName}:443?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2F%3Fed%3D2048#${hostName}`
+    const vlessMain = `vless://${userID}@${hostName}:443?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2Filovekleecloud%3Fed%3D2048#${hostName}`;
     return `
 ################################################################
 v2ray
@@ -621,7 +922,7 @@ clash-meta
   sni: ${hostName}
   client-fingerprint: chrome
   ws-opts:
-    path: "/?ed=2048"
+    path: "/ilovekleecloud?ed=2048"
     headers:
       host: ${hostName}
 ---------------------------------------------------------------
