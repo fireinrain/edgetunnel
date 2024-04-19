@@ -184,7 +184,7 @@ async function vlessOverWSHandler(request) {
             if (isDns) {
                 return handleDNSQuery(rawClientData, webSocket, vlessResponseHeader, log);
             }
-            await handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log);
+            handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log);
         },
         close() {
             log(`readableWebSocketStream is close`);
@@ -245,14 +245,14 @@ async function handleTCPOutBound(remoteSocket, addressType, addressRemote, portR
         }).finally(() => {
             safeCloseWebSocket(webSocket);
         })
-        await remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
+        remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
     }
 
     let tcpSocket = await connectAndWrite(addressRemote, portRemote);
 
     // when remoteSocket is ready, pass to websocket
     // remote--> ws
-    await remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
+    remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
 }
 
 /**
@@ -540,7 +540,7 @@ async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, re
     // 2. Socket.readable will be close without any data coming
     if (hasIncomingData === false && retry) {
         log(`retry`)
-        await retry();
+        retry();
     }
 }
 
