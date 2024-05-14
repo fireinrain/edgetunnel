@@ -78,11 +78,6 @@ const worker_default = {
 
                         //remove / from pathname
                         const uuidStr = url.pathname.substring(1);
-                        //check if a valid uuid
-
-                        if (!isValidUUID(uuidStr)) {
-                            return new Response('Not found', {status: 404});
-                        }
                         //check if user have a valid v2board subscription after sub expiration within 16days
                         //you need bind a kv namespace to this worker, see cloudflare dash
                         const validUserExpiredTime = await checkUserIdValid(uuidStr);
@@ -398,14 +393,6 @@ function safeCloseWebSocket(socket) {
 }
 
 
-/**
- * This is not real UUID validation
- * @param {string} uuid
- */
-function isValidUUID(uuid) {
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    return uuidRegex.test(uuid);
-}
 
 /**
  * check if a userid is valid
