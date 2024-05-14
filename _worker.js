@@ -1,63 +1,47 @@
-// <!--GAMFC-->version base on commit 841ed4e9ff121dde0ed6a56ae800c2e6c4f66056, time is 2024-04-16 18:02:37 UTC<!--GAMFC-END-->.
-// @ts-ignore
-import { connect } from 'cloudflare:sockets';
+// src/worker.js
+import { connect } from "cloudflare:sockets";
 
-// How to generate your own UUID:
-// [Windows] Press "Win + R", input cmd and run:  Powershell -NoExit -Command "[guid]::NewGuid()"
 let userID = 'd342d11e-d424-4583-b36e-524ab1f0afa4';
-
-let proxyIP = '';
-
-let socks5Address = '';
-let parsedSocks5Address = {};
-let enableSocks = false;
-// the api to check if a user is allowed to connect
-let checkUserIdApi = ''
+let hostnames = [''];
+let checkUserIdApi = '';
 let apiAuthToken = '';
-
-if (!isValidUUID(userID)) {
-    throw new Error('uuid is not valid');
-}
-
-export default {
+let sha224Password ;
+let proxyIP = '';
+const worker_default = {
     /**
      * @param {import("@cloudflare/workers-types").Request} request
-     * @param {{UUID: string, PROXYIP: string,SOCKS5: string,UserIdAPI :string,ApiAuthTOKEN: string}} env
+     * @param {proxyip: string, pswd: string} env
      * @param {import("@cloudflare/workers-types").ExecutionContext} ctx
      * @returns {Promise<Response>}
      */
     async fetch(request, env, ctx) {
         try {
-            userID = env.UUID || userID;
             proxyIP = env.PROXYIP || proxyIP;
-            socks5Address = env.SOCKS5 || socks5Address;
+            userID = env.UUID || userID;
             checkUserIdApi = env.UserIdAPI || checkUserIdApi;
             apiAuthToken = env.ApiAuthTOKEN || apiAuthToken;
-            if (socks5Address) {
-                try {
-                    parsedSocks5Address = socks5AddressParser(socks5Address);
-                    enableSocks = true;
-                } catch (err) {
-                    /** @type {Error} */ let e = err;
-                    console.log(e.toString());
-                    enableSocks = false;
-                }
-            }
+            sha224Password = sha256.sha224(userID);
             if (proxyIP.includes(',')) {
                 proxyIP = proxyIP.split(",")[Math.floor(Math.random() * proxyIP.split(",").length)];
             }
             while (proxyIP.includes(' ')) {
                 proxyIP = proxyIP.replace(' ', '');
             }
-            const upgradeHeader = request.headers.get('Upgrade');
+            const upgradeHeader = request.headers.get("Upgrade");
             if (!upgradeHeader || upgradeHeader !== 'websocket') {
                 const url = new URL(request.url);
                 switch (url.pathname) {
-                    case '/':
-                        return new Response(JSON.stringify(request.cf), { status: 200 });
+                    case '/cf':
+                        return new Response(JSON.stringify(request.cf, null, 4), {
+                            status: 200,
+                            headers: {
+                                "Content-Type": "application/json;charset=utf-8",
+                            },
+                        });
+
                     case `/${userID}`: {
-                        const vlessConfig = getVLESSConfig(userID, request.headers.get('Host'));
-                        return new Response(`${vlessConfig}`, {
+                        const trojanConfig = gettrojanConfig(userID, request.headers.get('Host'));
+                        return new Response(`${trojanConfig}`, {
                             status: 200,
                             headers: {
                                 "Content-Type": "text/plain;charset=utf-8",
@@ -65,6 +49,33 @@ export default {
                         });
                     }
                     default:
+                        // // return new Response('Not found', { status: 404 });
+                        // // For any other path, reverse proxy to 'ramdom website' and return the original response, caching it in the process
+                        // const randomHostname = hostnames[Math.floor(Math.random() * hostnames.length)];
+                        // const newHeaders = new Headers(request.headers);
+                        // newHeaders.set('cf-connecting-ip', '1.2.3.4');
+                        // newHeaders.set('x-forwarded-for', '1.2.3.4');
+                        // newHeaders.set('x-real-ip', '1.2.3.4');
+                        // newHeaders.set('referer', 'https://www.google.com/search?q=edtunnel');
+                        // // Use fetch to proxy the request to 15 different domains
+                        // const proxyUrl = 'https://' + randomHostname + url.pathname + url.search;
+                        // let modifiedRequest = new Request(proxyUrl, {
+                        //     method: request.method,
+                        //     headers: newHeaders,
+                        //     body: request.body,
+                        //     redirect: 'manual',
+                        // });
+                        // const proxyResponse = await fetch(modifiedRequest, { redirect: 'manual' });
+                        // // Check for 302 or 301 redirect status and return an error response
+                        // if ([301, 302].includes(proxyResponse.status)) {
+                        //     return new Response(`Redirects to ${randomHostname} are not allowed.`, {
+                        //         status: 403,
+                        //         statusText: 'Forbidden',
+                        //     });
+                        // }
+                        // // Return the response from the proxy server
+                        // return proxyResponse;
+
                         //remove / from pathname
                         const uuidStr = url.pathname.substring(1);
                         //check if a valid uuid
@@ -83,7 +94,7 @@ export default {
                         }
                 }
             } else {
-                return await vlessOverWSHandler(request);
+                return await trojanOverWSHandler(request);
             }
         } catch (err) {
             /** @type {Error} */ let e = err;
@@ -92,231 +103,308 @@ export default {
     },
 };
 
-
-/**
- *
- * @param {import("@cloudflare/workers-types").Request} request
- */
-async function vlessOverWSHandler(request) {
-
-    /** @type {import("@cloudflare/workers-types").WebSocket[]} */
-        // @ts-ignore
+async function trojanOverWSHandler(request) {
     const webSocketPair = new WebSocketPair();
     const [client, webSocket] = Object.values(webSocketPair);
-
     webSocket.accept();
-
-    let address = '';
-    let portWithRandomLog = '';
-    const log = (/** @type {string} */ info, /** @type {string | undefined} */ event) => {
-        console.log(`[${address}:${portWithRandomLog}] ${info}`, event || '');
+    let address = "";
+    let portWithRandomLog = "";
+    const log = (info, event) => {
+        console.log(`[${address}:${portWithRandomLog}] ${info}`, event || "");
     };
-    const earlyDataHeader = request.headers.get('sec-websocket-protocol') || '';
-
+    const earlyDataHeader = request.headers.get("sec-websocket-protocol") || "";
     const readableWebSocketStream = makeReadableWebSocketStream(webSocket, earlyDataHeader, log);
-
-    /** @type {{ value: import("@cloudflare/workers-types").Socket | null}}*/
     let remoteSocketWapper = {
-        value: null,
+        value: null
     };
-    let isDns = false;
-
-    // ws --> remote
+    let udpStreamWrite = null;
     readableWebSocketStream.pipeTo(new WritableStream({
         async write(chunk, controller) {
-            if (isDns) {
-                return await handleDNSQuery(chunk, webSocket, null, log);
+            if (udpStreamWrite) {
+                return udpStreamWrite(chunk);
             }
             if (remoteSocketWapper.value) {
-                const writer = remoteSocketWapper.value.writable.getWriter()
+                const writer = remoteSocketWapper.value.writable.getWriter();
                 await writer.write(chunk);
                 writer.releaseLock();
                 return;
             }
-
             const {
-                realUserid,
                 hasError,
                 message,
-                addressType,
                 portRemote = 443,
-                addressRemote = '',
-                rawDataIndex,
-                vlessVersion = new Uint8Array([0, 0]),
-                isUDP,
-            } = processVlessHeader(chunk, userID);
+                addressRemote = "",
+                rawClientData
+            } = await parseTrojanHeader(chunk);
             address = addressRemote;
-            portWithRandomLog = `${portRemote}--${Math.random()} ${isUDP ? 'udp ' : 'tcp '
-            } `;
+            portWithRandomLog = `${portRemote}--${Math.random()} tcp`;
             if (hasError) {
-                // controller.error(message);
-                throw new Error(message); // cf seems has bug, controller.error will not end stream
-                // webSocket.close(1000, message);
+                throw new Error(message);
                 return;
             }
-            if (realUserid !== userID) {
-                let validUser = await checkUserIdValid(realUserid);
-                if (!validUser) {
-                    // controller.error(message);
-                    throw new Error(message); // cf seems has bug, controller.error will not end stream
-                    // webSocket.close(1000, message);
-                    return;
-                }
-            }
-            //check if user in cloudflare kv
-            console.log("当前用户: ", realUserid)
-            // if UDP but port not DNS port, close it
-            if (isUDP) {
-                if (portRemote === 53) {
-                    isDns = true;
-                } else {
-                    // controller.error('UDP proxy only enable for DNS which is port 53');
-                    throw new Error('UDP proxy only enable for DNS which is port 53'); // cf seems has bug, controller.error will not end stream
-                    return;
-                }
-            }
-            // ["version", "附加信息长度 N"]
-            const vlessResponseHeader = new Uint8Array([vlessVersion[0], 0]);
-            const rawClientData = chunk.slice(rawDataIndex);
-
-            if (isDns) {
-                return handleDNSQuery(rawClientData, webSocket, vlessResponseHeader, log);
-            }
-            handleTCPOutBound(remoteSocketWapper, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log);
+            handleTCPOutBound(remoteSocketWapper, addressRemote, portRemote, rawClientData, webSocket, log);
         },
         close() {
-            log(`readableWebSocketStream is close`);
+            log(`readableWebSocketStream is closed`);
         },
         abort(reason) {
-            log(`readableWebSocketStream is abort`, JSON.stringify(reason));
-        },
+            log(`readableWebSocketStream is aborted`, JSON.stringify(reason));
+        }
     })).catch((err) => {
-        log('readableWebSocketStream pipeTo error', err);
+        log("readableWebSocketStream pipeTo error", err);
     });
-
     return new Response(null, {
         status: 101,
         // @ts-ignore
-        webSocket: client,
+        webSocket: client
     });
 }
 
-/**
- * Handles outbound TCP connections.
- *
- * @param {any} remoteSocket
- * @param {number} addressType The remote address type to connect to.
- * @param {string} addressRemote The remote address to connect to.
- * @param {number} portRemote The remote port to connect to.
- * @param {Uint8Array} rawClientData The raw client data to write.
- * @param {import("@cloudflare/workers-types").WebSocket} webSocket The WebSocket to pass the remote socket to.
- * @param {Uint8Array} vlessResponseHeader The VLESS response header.
- * @param {function} log The logging function.
- * @returns {Promise<void>} The remote socket.
- */
-async function handleTCPOutBound(remoteSocket, addressType, addressRemote, portRemote, rawClientData, webSocket, vlessResponseHeader, log,) {
-    async function connectAndWrite(address, port, socks = false) {
-        /** @type {import("@cloudflare/workers-types").Socket} */
-        const tcpSocket = socks ? await socks5Connect(addressType, address, port, log)
-            : connect({
-                hostname: address,
-                port: port,
-            });
-        remoteSocket.value = tcpSocket;
-        log(`connected to ${address}:${port}`);
-        const writer = tcpSocket.writable.getWriter();
-        await writer.write(rawClientData); // first write, normal is tls client hello
-        writer.releaseLock();
-        return tcpSocket;
+async function parseTrojanHeader(buffer) {
+    if (buffer.byteLength < 56) {
+        return {
+            hasError: true,
+            message: "invalid data"
+        };
     }
+    let crLfIndex = 56;
+    if (new Uint8Array(buffer.slice(56, 57))[0] !== 0x0d || new Uint8Array(buffer.slice(57, 58))[0] !== 0x0a) {
+        return {
+            hasError: true,
+            message: "invalid header format (missing CR LF)"
+        };
+    }
+    const password = new TextDecoder().decode(buffer.slice(0, crLfIndex));
+    //校验userID
 
-    // if the cf connect tcp socket have no incoming data, we retry to redirect ip
-    async function retry() {
-        if (enableSocks) {
-            tcpSocket = await connectAndWrite(addressRemote, portRemote, true);
-        } else {
-            tcpSocket = await connectAndWrite(proxyIP || addressRemote, portRemote);
+    if (password !== sha224Password) {
+
+        let validUser = await checkUserIdValid(password);
+        if (!validUser) {
+            return {
+                hasError: true,
+                message: "invalid password"
+            };
         }
-        // no matter retry success or not, close websocket
-        tcpSocket.closed.catch(error => {
-            console.log('retry tcpSocket closed error', error);
-        }).finally(() => {
-            safeCloseWebSocket(webSocket);
-        })
-        remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, null, log);
+
     }
 
-    let tcpSocket = await connectAndWrite(addressRemote, portRemote);
+    const socks5DataBuffer = buffer.slice(crLfIndex + 2);
+    if (socks5DataBuffer.byteLength < 6) {
+        return {
+            hasError: true,
+            message: "invalid SOCKS5 request data"
+        };
+    }
 
-    // when remoteSocket is ready, pass to websocket
-    // remote--> ws
-    remoteSocketToWS(tcpSocket, webSocket, vlessResponseHeader, retry, log);
+    const view = new DataView(socks5DataBuffer);
+    const cmd = view.getUint8(0);
+    if (cmd !== 1) {
+        return {
+            hasError: true,
+            message: "unsupported command, only TCP (CONNECT) is allowed"
+        };
+    }
+
+    const atype = view.getUint8(1);
+    // 0x01: IPv4 address
+    // 0x03: Domain name
+    // 0x04: IPv6 address
+    let addressLength = 0;
+    let addressIndex = 2;
+    let address = "";
+    switch (atype) {
+        case 1:
+            addressLength = 4;
+            address = new Uint8Array(
+                socks5DataBuffer.slice(addressIndex, addressIndex + addressLength)
+            ).join(".");
+            break;
+        case 3:
+            addressLength = new Uint8Array(
+                socks5DataBuffer.slice(addressIndex, addressIndex + 1)
+            )[0];
+            addressIndex += 1;
+            address = new TextDecoder().decode(
+                socks5DataBuffer.slice(addressIndex, addressIndex + addressLength)
+            );
+            break;
+        case 4:
+            addressLength = 16;
+            const dataView = new DataView(socks5DataBuffer.slice(addressIndex, addressIndex + addressLength));
+            const ipv6 = [];
+            for (let i = 0; i < 8; i++) {
+                ipv6.push(dataView.getUint16(i * 2).toString(16));
+            }
+            address = ipv6.join(":");
+            break;
+        default:
+            return {
+                hasError: true,
+                message: `invalid addressType is ${atype}`
+            };
+    }
+
+    if (!address) {
+        return {
+            hasError: true,
+            message: `address is empty, addressType is ${atype}`
+        };
+    }
+
+    const portIndex = addressIndex + addressLength;
+    const portBuffer = socks5DataBuffer.slice(portIndex, portIndex + 2);
+    const portRemote = new DataView(portBuffer).getUint16(0);
+    return {
+        hasError: false,
+        addressRemote: address,
+        portRemote,
+        rawClientData: socks5DataBuffer.slice(portIndex + 4)
+    };
 }
 
-/**
- *
- * @param {import("@cloudflare/workers-types").WebSocket} webSocketServer
- * @param {string} earlyDataHeader for ws 0rtt
- * @param {(info: string)=> void} log for ws 0rtt
- */
+async function handleTCPOutBound(remoteSocket, addressRemote, portRemote, rawClientData, webSocket, log) {
+    async function connectAndWrite(address, port) {
+        const tcpSocket2 = connect({
+            hostname: address,
+            port
+        });
+        remoteSocket.value = tcpSocket2;
+        log(`connected to ${address}:${port}`);
+        const writer = tcpSocket2.writable.getWriter();
+        await writer.write(rawClientData);
+        writer.releaseLock();
+        return tcpSocket2;
+    }
+    async function retry() {
+        const tcpSocket2 = await connectAndWrite(proxyIP || addressRemote, portRemote);
+        tcpSocket2.closed.catch((error) => {
+            console.log("retry tcpSocket closed error", error);
+        }).finally(() => {
+            safeCloseWebSocket(webSocket);
+        });
+        remoteSocketToWS(tcpSocket2, webSocket, null, log);
+    }
+    const tcpSocket = await connectAndWrite(addressRemote, portRemote);
+    remoteSocketToWS(tcpSocket, webSocket, retry, log);
+}
+
 function makeReadableWebSocketStream(webSocketServer, earlyDataHeader, log) {
     let readableStreamCancel = false;
     const stream = new ReadableStream({
         start(controller) {
-            webSocketServer.addEventListener('message', (event) => {
+            webSocketServer.addEventListener("message", (event) => {
                 if (readableStreamCancel) {
                     return;
                 }
                 const message = event.data;
                 controller.enqueue(message);
             });
-
-            // The event means that the client closed the client -> server stream.
-            // However, the server -> client stream is still open until you call close() on the server side.
-            // The WebSocket protocol says that a separate close message must be sent in each direction to fully close the socket.
-            webSocketServer.addEventListener('close', () => {
-                    // client send close, need close server
-                    // if stream is cancel, skip controller.close
-                    safeCloseWebSocket(webSocketServer);
-                    if (readableStreamCancel) {
-                        return;
-                    }
-                    controller.close();
+            webSocketServer.addEventListener("close", () => {
+                safeCloseWebSocket(webSocketServer);
+                if (readableStreamCancel) {
+                    return;
                 }
-            );
-            webSocketServer.addEventListener('error', (err) => {
-                    log('webSocketServer has error');
-                    controller.error(err);
-                }
-            );
-            // for ws 0rtt
-            const {earlyData, error} = base64ToArrayBuffer(earlyDataHeader);
+                controller.close();
+            });
+            webSocketServer.addEventListener("error", (err) => {
+                log("webSocketServer error");
+                controller.error(err);
+            });
+            const { earlyData, error } = base64ToArrayBuffer(earlyDataHeader);
             if (error) {
                 controller.error(error);
             } else if (earlyData) {
                 controller.enqueue(earlyData);
             }
         },
-
-        pull(controller) {
-            // if ws can stop read if stream is full, we can implement backpressure
-            // https://streams.spec.whatwg.org/#example-rs-push-backpressure
-        },
+        pull(controller) {},
         cancel(reason) {
-            // 1. pipe WritableStream has error, this cancel will called, so ws handle server close into here
-            // 2. if readableStream is cancel, all controller.close/enqueue need skip,
-            // 3. but from testing controller.error still work even if readableStream is cancel
             if (readableStreamCancel) {
                 return;
             }
-            log(`ReadableStream was canceled, due to ${reason}`)
+            log(`readableStream was canceled, due to ${reason}`);
             readableStreamCancel = true;
             safeCloseWebSocket(webSocketServer);
         }
     });
-
     return stream;
+}
 
+async function remoteSocketToWS(remoteSocket, webSocket, retry, log) {
+    let hasIncomingData = false;
+    await remoteSocket.readable.pipeTo(
+        new WritableStream({
+            start() {},
+            /**
+             *
+             * @param {Uint8Array} chunk
+             * @param {*} controller
+             */
+            async write(chunk, controller) {
+                hasIncomingData = true;
+                if (webSocket.readyState !== WS_READY_STATE_OPEN) {
+                    controller.error(
+                        "webSocket connection is not open"
+                    );
+                }
+                webSocket.send(chunk);
+            },
+            close() {
+                log(`remoteSocket.readable is closed, hasIncomingData: ${hasIncomingData}`);
+            },
+            abort(reason) {
+                console.error("remoteSocket.readable abort", reason);
+            }
+        })
+    ).catch((error) => {
+        console.error(
+            `remoteSocketToWS error:`,
+            error.stack || error
+        );
+        safeCloseWebSocket(webSocket);
+    });
+    if (hasIncomingData === false && retry) {
+        log(`retry`);
+        retry();
+    }
+}
+
+function base64ToArrayBuffer(base64Str) {
+    if (!base64Str) {
+        return { error: null };
+    }
+    try {
+        base64Str = base64Str.replace(/-/g, "+").replace(/_/g, "/");
+        const decode = atob(base64Str);
+        const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
+        return { earlyData: arryBuffer.buffer, error: null };
+    } catch (error) {
+        return { error };
+    }
+}
+
+let WS_READY_STATE_OPEN = 1;
+let WS_READY_STATE_CLOSING = 2;
+
+function safeCloseWebSocket(socket) {
+    try {
+        if (socket.readyState === WS_READY_STATE_OPEN || socket.readyState === WS_READY_STATE_CLOSING) {
+            socket.close();
+        }
+    } catch (error) {
+        console.error("safeCloseWebSocket error", error);
+    }
+}
+
+
+/**
+ * This is not real UUID validation
+ * @param {string} uuid
+ */
+function isValidUUID(uuid) {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    return uuidRegex.test(uuid);
 }
 
 /**
@@ -346,597 +434,610 @@ async function checkUserIdValid(realUserId) {
 
 }
 
-// https://xtls.github.io/development/protocols/vless.html
-// https://github.com/zizifn/excalidraw-backup/blob/main/v2ray-protocol.excalidraw
+export {
+    worker_default as
+        default
+};
 
-/**
- *
- * @param { ArrayBuffer} vlessBuffer
- * @param {string} userID
- * @returns
- */
-function processVlessHeader(
-    vlessBuffer,
-    userID
-) {
-    if (vlessBuffer.byteLength < 24) {
-        return {
-            hasError: true,
-            message: 'invalid data',
-        };
-    }
-    const version = new Uint8Array(vlessBuffer.slice(0, 1));
-    let isValidUser = true;
-    let isUDP = false;
-    // if (stringify(new Uint8Array(vlessBuffer.slice(1, 17))) === userID) {
-    //     isValidUser = true;
-    // }
-    // if (!isValidUser) {
-    //     return {
-    //         hasError: true,
-    //         message: 'invalid user',
-    //     };
-    // }
-    const newUserId = stringify(new Uint8Array(vlessBuffer.slice(1, 17)))
+//# sourceMappingURL=worker.js.map
+function gettrojanConfig(Pswd, hostName) {
+    const wtrojanws = `trojan://${Pswd}\u0040www.visa.com.sg:8880?security=none&type=ws&host=${hostName}&path=%2F%3Fed%3D2560#${hostName}`;
+    const ptrojanwstls = `trojan://${Pswd}\u0040www.visa.com.sg:8443?security=tls&type=ws&host=${hostName}&sni=${hostName}&fp=random&path=%2F%3Fed%3D2560#${hostName}`;
+    const note = `甬哥博客地址：https://ygkkk.blogspot.com\n甬哥YouTube频道：https://www.youtube.com/@ygkkk\n甬哥TG电报群组：https://t.me/+jZHc6-A-1QQ5ZGVl\n甬哥TG电报频道：https://t.me/+DkC9ZZUgEFQzMTZl\n\n\n正在使用的ProxyIP：${proxyIP}`;
 
+    if (hostName.includes('pages.dev')) {
+        return `
+==========================配置详解==============================
 
-    const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
-    //skip opt for now
+${note}
 
-    const command = new Uint8Array(
-        vlessBuffer.slice(18 + optLength, 18 + optLength + 1)
-    )[0];
-
-    // 0x01 TCP
-    // 0x02 UDP
-    // 0x03 MUX
-    if (command === 1) {
-    } else if (command === 2) {
-        isUDP = true;
-    } else {
-        return {
-            hasError: true,
-            message: `command ${command} is not support, command 01-tcp,02-udp,03-mux`,
-        };
-    }
-    const portIndex = 18 + optLength + 1;
-    const portBuffer = vlessBuffer.slice(portIndex, portIndex + 2);
-    // port is big-Endian in raw data etc 80 == 0x005d
-    const portRemote = new DataView(portBuffer).getUint16(0);
-
-    let addressIndex = portIndex + 2;
-    const addressBuffer = new Uint8Array(
-        vlessBuffer.slice(addressIndex, addressIndex + 1)
-    );
-
-    // 1--> ipv4  addressLength =4
-    // 2--> domain name addressLength=addressBuffer[1]
-    // 3--> ipv6  addressLength =16
-    const addressType = addressBuffer[0];
-    let addressLength = 0;
-    let addressValueIndex = addressIndex + 1;
-    let addressValue = '';
-    switch (addressType) {
-        case 1:
-            addressLength = 4;
-            addressValue = new Uint8Array(
-                vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength)
-            ).join('.');
-            break;
-        case 2:
-            addressLength = new Uint8Array(
-                vlessBuffer.slice(addressValueIndex, addressValueIndex + 1)
-            )[0];
-            addressValueIndex += 1;
-            addressValue = new TextDecoder().decode(
-                vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength)
-            );
-            break;
-        case 3:
-            addressLength = 16;
-            const dataView = new DataView(
-                vlessBuffer.slice(addressValueIndex, addressValueIndex + addressLength)
-            );
-            // 2001:0db8:85a3:0000:0000:8a2e:0370:7334
-            const ipv6 = [];
-            for (let i = 0; i < 8; i++) {
-                ipv6.push(dataView.getUint16(i * 2).toString(16));
-            }
-            addressValue = ipv6.join(':');
-            // seems no need add [] for ipv6
-            break;
-        default:
-            return {
-                hasError: true,
-                message: `invild  addressType is ${addressType}`,
-            };
-    }
-    if (!addressValue) {
-        return {
-            hasError: true,
-            message: `addressValue is empty, addressType is ${addressType}`,
-        };
-    }
-
-    return {
-        realUserid: newUserId,
-        hasError: false,
-        addressRemote: addressValue,
-        addressType,
-        portRemote,
-        rawDataIndex: addressValueIndex + addressLength,
-        vlessVersion: version,
-        isUDP,
-    };
-}
-
-
-/**
- *
- * @param {import("@cloudflare/workers-types").Socket} remoteSocket
- * @param {import("@cloudflare/workers-types").WebSocket} webSocket
- * @param {ArrayBuffer} vlessResponseHeader
- * @param {(() => Promise<void>) | null} retry
- * @param {*} log
- */
-async function remoteSocketToWS(remoteSocket, webSocket, vlessResponseHeader, retry, log) {
-    // remote--> ws
-    let remoteChunkCount = 0;
-    let chunks = [];
-    /** @type {ArrayBuffer | null} */
-    let vlessHeader = vlessResponseHeader;
-    let hasIncomingData = false; // check if remoteSocket has incoming data
-    await remoteSocket.readable
-        .pipeTo(
-            new WritableStream({
-                start() {
-                },
-                /**
-                 *
-                 * @param {Uint8Array} chunk
-                 * @param {*} controller
-                 */
-                async write(chunk, controller) {
-                    hasIncomingData = true;
-                    // remoteChunkCount++;
-                    if (webSocket.readyState !== WS_READY_STATE_OPEN) {
-                        controller.error(
-                            'webSocket.readyState is not open, maybe close'
-                        );
-                    }
-                    if (vlessHeader) {
-                        webSocket.send(await new Blob([vlessHeader, chunk]).arrayBuffer());
-                        vlessHeader = null;
-                    } else {
-                        // seems no need rate limit this, CF seems fix this??..
-                        // if (remoteChunkCount > 20000) {
-                        // 	// cf one package is 4096 byte(4kb),  4096 * 20000 = 80M
-                        // 	await delay(1);
-                        // }
-                        webSocket.send(chunk);
-                    }
-                },
-                close() {
-                    log(`remoteConnection!.readable is close with hasIncomingData is ${hasIncomingData}`);
-                    // safeCloseWebSocket(webSocket); // no need server close websocket frist for some case will casue HTTP ERR_CONTENT_LENGTH_MISMATCH issue, client will send close event anyway.
-                },
-                abort(reason) {
-                    console.error(`remoteConnection!.readable abort`, reason);
-                },
-            })
-        )
-        .catch((error) => {
-            console.error(
-                `remoteSocketToWS has exception `,
-                error.stack || error
-            );
-            safeCloseWebSocket(webSocket);
-        });
-
-    // seems is cf connect socket have error,
-    // 1. Socket.closed will have error
-    // 2. Socket.readable will be close without any data coming
-    if (hasIncomingData === false && retry) {
-        log(`retry`)
-        retry();
-    }
-}
-
-/**
- *
- * @param {string} base64Str
- * @returns
- */
-function base64ToArrayBuffer(base64Str) {
-    if (!base64Str) {
-        return {error: null};
-    }
-    try {
-        // go use modified Base64 for URL rfc4648 which js atob not support
-        base64Str = base64Str.replace(/-/g, '+').replace(/_/g, '/');
-        const decode = atob(base64Str);
-        const arryBuffer = Uint8Array.from(decode, (c) => c.charCodeAt(0));
-        return {earlyData: arryBuffer.buffer, error: null};
-    } catch (error) {
-        return {error};
-    }
-}
-
-/**
- * This is not real UUID validation
- * @param {string} uuid
- */
-function isValidUUID(uuid) {
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    return uuidRegex.test(uuid);
-}
-
-const WS_READY_STATE_OPEN = 1;
-const WS_READY_STATE_CLOSING = 2;
-
-/**
- * Normally, WebSocket will not has exceptions when close.
- * @param {import("@cloudflare/workers-types").WebSocket} socket
- */
-function safeCloseWebSocket(socket) {
-    try {
-        if (socket.readyState === WS_READY_STATE_OPEN || socket.readyState === WS_READY_STATE_CLOSING) {
-            socket.close();
-        }
-    } catch (error) {
-        console.error('safeCloseWebSocket error', error);
-    }
-}
-
-const byteToHex = [];
-for (let i = 0; i < 256; ++i) {
-    byteToHex.push((i + 256).toString(16).slice(1));
-}
-
-function unsafeStringify(arr, offset = 0) {
-    return (byteToHex[arr[offset + 0]] + byteToHex[arr[offset + 1]] + byteToHex[arr[offset + 2]] + byteToHex[arr[offset + 3]] + "-" + byteToHex[arr[offset + 4]] + byteToHex[arr[offset + 5]] + "-" + byteToHex[arr[offset + 6]] + byteToHex[arr[offset + 7]] + "-" + byteToHex[arr[offset + 8]] + byteToHex[arr[offset + 9]] + "-" + byteToHex[arr[offset + 10]] + byteToHex[arr[offset + 11]] + byteToHex[arr[offset + 12]] + byteToHex[arr[offset + 13]] + byteToHex[arr[offset + 14]] + byteToHex[arr[offset + 15]]).toLowerCase();
-}
-
-function stringify(arr, offset = 0) {
-    const uuid = unsafeStringify(arr, offset);
-    if (!isValidUUID(uuid)) {
-        throw TypeError("Stringified UUID is invalid");
-    }
-    return uuid;
-}
-
-/**
- *
- * @param {ArrayBuffer} udpChunk
- * @param {import("@cloudflare/workers-types").WebSocket} webSocket
- * @param {ArrayBuffer} vlessResponseHeader
- * @param {(string)=> void} log
- */
-async function handleDNSQuery(udpChunk, webSocket, vlessResponseHeader, log) {
-    // no matter which DNS server client send, we alwasy use hard code one.
-    // beacsue someof DNS server is not support DNS over TCP
-    try {
-        const dnsServer = '8.8.4.4'; // change to 1.1.1.1 after cf fix connect own ip bug
-        const dnsPort = 53;
-        /** @type {ArrayBuffer | null} */
-        let vlessHeader = vlessResponseHeader;
-        /** @type {import("@cloudflare/workers-types").Socket} */
-        const tcpSocket = connect({
-            hostname: dnsServer,
-            port: dnsPort,
-        });
-
-        log(`connected to ${dnsServer}:${dnsPort}`);
-        const writer = tcpSocket.writable.getWriter();
-        await writer.write(udpChunk);
-        writer.releaseLock();
-        await tcpSocket.readable.pipeTo(new WritableStream({
-            async write(chunk) {
-                if (webSocket.readyState === WS_READY_STATE_OPEN) {
-                    if (vlessHeader) {
-                        webSocket.send(await new Blob([vlessHeader, chunk]).arrayBuffer());
-                        vlessHeader = null;
-                    } else {
-                        webSocket.send(chunk);
-                    }
-                }
-            },
-            close() {
-                log(`dns server(${dnsServer}) tcp is close`);
-            },
-            abort(reason) {
-                console.error(`dns server(${dnsServer}) tcp is abort`, reason);
-            },
-        }));
-    } catch (error) {
-        console.error(
-            `handleDNSQuery have exception, error: ${error.message}`
-        );
-    }
-}
-
-/**
- *
- * @param {number} addressType
- * @param {string} addressRemote
- * @param {number} portRemote
- * @param {function} log The logging function.
- */
-async function socks5Connect(addressType, addressRemote, portRemote, log) {
-    const {username, password, hostname, port} = parsedSocks5Address;
-    // Connect to the SOCKS server
-    const socket = connect({
-        hostname,
-        port,
-    });
-
-    // Request head format (Worker -> Socks Server):
-    // +----+----------+----------+
-    // |VER | NMETHODS | METHODS  |
-    // +----+----------+----------+
-    // | 1  |    1     | 1 to 255 |
-    // +----+----------+----------+
-
-    // https://en.wikipedia.org/wiki/SOCKS#SOCKS5
-    // For METHODS:
-    // 0x00 NO AUTHENTICATION REQUIRED
-    // 0x02 USERNAME/PASSWORD https://datatracker.ietf.org/doc/html/rfc1929
-    const socksGreeting = new Uint8Array([5, 2, 0, 2]);
-
-    const writer = socket.writable.getWriter();
-
-    await writer.write(socksGreeting);
-    log('sent socks greeting');
-
-    const reader = socket.readable.getReader();
-    const encoder = new TextEncoder();
-    let res = (await reader.read()).value;
-    // Response format (Socks Server -> Worker):
-    // +----+--------+
-    // |VER | METHOD |
-    // +----+--------+
-    // | 1  |   1    |
-    // +----+--------+
-    if (res[0] !== 0x05) {
-        log(`socks server version error: ${res[0]} expected: 5`);
-        return;
-    }
-    if (res[1] === 0xff) {
-        log("no acceptable methods");
-        return;
-    }
-
-    // if return 0x0502
-    if (res[1] === 0x02) {
-        log("socks server needs auth");
-        if (!username || !password) {
-            log("please provide username/password");
-            return;
-        }
-        // +----+------+----------+------+----------+
-        // |VER | ULEN |  UNAME   | PLEN |  PASSWD  |
-        // +----+------+----------+------+----------+
-        // | 1  |  1   | 1 to 255 |  1   | 1 to 255 |
-        // +----+------+----------+------+----------+
-        const authRequest = new Uint8Array([
-            1,
-            username.length,
-            ...encoder.encode(username),
-            password.length,
-            ...encoder.encode(password)
-        ]);
-        await writer.write(authRequest);
-        res = (await reader.read()).value;
-        // expected 0x0100
-        if (res[0] !== 0x01 || res[1] !== 0x00) {
-            log("fail to auth socks server");
-            return;
-        }
-    }
-
-    // Request data format (Worker -> Socks Server):
-    // +----+-----+-------+------+----------+----------+
-    // |VER | CMD |  RSV  | ATYP | DST.ADDR | DST.PORT |
-    // +----+-----+-------+------+----------+----------+
-    // | 1  |  1  | X'00' |  1   | Variable |    2     |
-    // +----+-----+-------+------+----------+----------+
-    // ATYP: address type of following address
-    // 0x01: IPv4 address
-    // 0x03: Domain name
-    // 0x04: IPv6 address
-    // DST.ADDR: desired destination address
-    // DST.PORT: desired destination port in network octet order
-
-    // addressType
-    // 1--> ipv4  addressLength =4
-    // 2--> domain name
-    // 3--> ipv6  addressLength =16
-    let DSTADDR;	// DSTADDR = ATYP + DST.ADDR
-    switch (addressType) {
-        case 1:
-            DSTADDR = new Uint8Array(
-                [1, ...addressRemote.split('.').map(Number)]
-            );
-            break;
-        case 2:
-            DSTADDR = new Uint8Array(
-                [3, addressRemote.length, ...encoder.encode(addressRemote)]
-            );
-            break;
-        case 3:
-            DSTADDR = new Uint8Array(
-                [4, ...addressRemote.split(':').flatMap(x => [parseInt(x.slice(0, 2), 16), parseInt(x.slice(2), 16)])]
-            );
-            break;
-        default:
-            log(`invild  addressType is ${addressType}`);
-            return;
-    }
-    const socksRequest = new Uint8Array([5, 1, 0, ...DSTADDR, portRemote >> 8, portRemote & 0xff]);
-    await writer.write(socksRequest);
-    log('sent socks request');
-
-    res = (await reader.read()).value;
-    // Response format (Socks Server -> Worker):
-    //  +----+-----+-------+------+----------+----------+
-    // |VER | REP |  RSV  | ATYP | BND.ADDR | BND.PORT |
-    // +----+-----+-------+------+----------+----------+
-    // | 1  |  1  | X'00' |  1   | Variable |    2     |
-    // +----+-----+-------+------+----------+----------+
-    if (res[1] === 0x00) {
-        log("socks connection opened");
-    } else {
-        log("fail to open socks connection");
-        return;
-    }
-    writer.releaseLock();
-    reader.releaseLock();
-    return socket;
-}
-
-/**
- *
- * @param {import("@cloudflare/workers-types").WebSocket} webSocket
- * @param {ArrayBuffer} vlessResponseHeader
- * @param {(string)=> void} log
- */
-async function handleUDPOutBound(webSocket, vlessResponseHeader, log) {
-
-    let isVlessHeaderSent = false;
-    const transformStream = new TransformStream({
-        start(controller) {
-
-        },
-        transform(chunk, controller) {
-            // udp message 2 byte is the the length of udp data
-            // TODO: this should have bug, beacsue maybe udp chunk can be in two websocket message
-            for (let index = 0; index < chunk.byteLength;) {
-                const lengthBuffer = chunk.slice(index, index + 2);
-                const udpPakcetLength = new DataView(lengthBuffer).getUint16(0);
-                const udpData = new Uint8Array(
-                    chunk.slice(index + 2, index + 2 + udpPakcetLength)
-                );
-                index = index + 2 + udpPakcetLength;
-                controller.enqueue(udpData);
-            }
-        },
-        flush(controller) {
-        }
-    });
-
-    // only handle dns udp for now
-    transformStream.readable.pipeTo(new WritableStream({
-        async write(chunk) {
-            const resp = await fetch('https://1.1.1.1/dns-query',
-                {
-                    method: 'POST',
-                    headers: {
-                        'content-type': 'application/dns-message',
-                    },
-                    body: chunk,
-                })
-            const dnsQueryResult = await resp.arrayBuffer();
-            const udpSize = dnsQueryResult.byteLength;
-            // console.log([...new Uint8Array(dnsQueryResult)].map((x) => x.toString(16)));
-            const udpSizeBuffer = new Uint8Array([(udpSize >> 8) & 0xff, udpSize & 0xff]);
-            if (webSocket.readyState === WS_READY_STATE_OPEN) {
-                log(`doh success and dns message length is ${udpSize}`);
-                if (isVlessHeaderSent) {
-                    webSocket.send(await new Blob([udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-                } else {
-                    webSocket.send(await new Blob([vlessResponseHeader, udpSizeBuffer, dnsQueryResult]).arrayBuffer());
-                    isVlessHeaderSent = true;
-                }
-            }
-        }
-    })).catch((error) => {
-        log('dns udp has error' + error)
-    });
-
-    const writer = transformStream.writable.getWriter();
-
-    return {
-        /**
-         *
-         * @param {Uint8Array} chunk
-         */
-        write(chunk) {
-            writer.write(chunk);
-        }
-    };
-}
-
-
-
-
-/**
- * parse a socks5 address into a js object
- * @param {string} address
- */
-function socks5AddressParser(address) {
-    let [latter, former] = address.split("@").reverse();
-    let username, password, hostname, port;
-    if (former) {
-        const formers = former.split(":");
-        if (formers.length !== 2) {
-            throw new Error('Invalid SOCKS address format');
-        }
-        [username, password] = formers;
-    }
-    const latters = latter.split(":");
-    port = Number(latters.pop());
-    if (isNaN(port)) {
-        throw new Error('Invalid SOCKS address format');
-    }
-    hostname = latters.join(":");
-    const regex = /^\[.*\]$/;
-    if (hostname.includes(":") && !regex.test(hostname)) {
-        throw new Error('Invalid SOCKS address format');
-    }
-    return {
-        username,
-        password,
-        hostname,
-        port,
-    }
-}
-
-/**
- *
- * @param {string} userID
- * @param {string | null} hostName
- * @returns {string}
- */
-function getVLESSConfig(userID, hostName) {
-    let vv = 'v';
-    let ll = 'l';
-    let ee = 'e';
-    let ss = 's';
-    const configMain = `${vv}${ll}${ee}${ss}${ss}://${userID}@${hostName}:443?encryption=none&security=tls&sni=${hostName}&fp=randomized&type=ws&host=${hostName}&path=%2Filovekleecloud%3Fed%3D2048#${hostName}`;
-    return `
 ################################################################
-v2ray
+CF-pages-trojan+ws+tls节点，分享链接如下：
+
+${ptrojanwstls}
+
 ---------------------------------------------------------------
-${configMain}
+注意：如果 ${hostName} 在本地网络打不开（中国移动用户注意），客户端必须开启切片功能
 ---------------------------------------------------------------
-################################################################
-clash-meta
----------------------------------------------------------------
-- type: ${vv}${ll}${ee}${ss}${ss}
-  name: ${hostName}
-  server: ${hostName}
-  port: 443
-  uuid: ${userID}
-  network: ws
-  tls: true
-  udp: false
-  sni: ${hostName}
-  client-fingerprint: chrome
-  ws-opts:
-    path: "/ilovekleecloud?ed=2048"
-    headers:
-      host: ${hostName}
----------------------------------------------------------------
+客户端必要文明参数如下：
+客户端地址(address)：自定义的域名 或者 优选域名 或者 优选IP（反代IP必须与反代端口对应）
+端口(port)：6个https端口可任意选择(443、8443、2053、2083、2087、2096)
+密码：${Pswd}
+传输协议(network)：ws 或者 websocket
+伪装域名(host)：${hostName}
+路径(path)：/?ed=2560
+传输安全(TLS)：开启
+跳过证书验证(allowlnsecure)：false
 ################################################################
 `;
+    } else {
+        return `
+==========================配置详解==============================
+
+${note}
+
+################################################################
+一、CF-workers-trojan+ws节点，分享链接如下：
+
+${wtrojanws}
+
+---------------------------------------------------------------
+注意：当前节点无需使用CF解析完成的域名，客户端选项的TLS选项必须关闭
+---------------------------------------------------------------
+客户端必要文明参数如下：
+客户端地址(address)：自定义的域名 或者 优选域名 或者 优选IP（反代IP必须与反代端口对应）
+端口(port)：7个http端口可任意选择(80、8080、8880、2052、2082、2086、2095)
+密码：${Pswd}
+传输协议(network)：ws 或者 websocket
+伪装域名(host)：${hostName}
+路径(path)：/?ed=2560
+################################################################
+
+################################################################
+二、CF-workers-trojan+ws+tls 或者 CF-pages-trojan+ws+tls节点，分享链接如下：
+
+${ptrojanwstls}
+
+---------------------------------------------------------------
+注意：使用workers域名开启TLS，客户端必须开启切片功能
+---------------------------------------------------------------
+客户端必要文明参数如下：
+客户端地址(address)：自定义的域名 或者 优选域名 或者 优选IP（反代IP必须与反代端口对应）
+端口(port)：6个https端口可任意选择(443、8443、2053、2083、2087、2096)
+密码：${Pswd}
+传输协议(network)：ws 或者 websocket
+伪装域名(host)：${hostName}
+路径(path)：/?ed=2560
+传输安全(TLS)：开启
+跳过证书验证(allowlnsecure)：false
+################################################################
+`;
+    }
 }
+
+/**
+ * [js-sha256]{@link https://github.com/emn178/js-sha256}
+ *
+ * @version 0.11.0
+ * @author Chen, Yi-Cyuan [emn178@gmail.com]
+ * @copyright Chen, Yi-Cyuan 2014-2024
+ * @license MIT
+ */
+/*jslint bitwise: true */
+(function () {
+    'use strict';
+
+    var ERROR = 'input is invalid type';
+    var WINDOW = typeof window === 'object';
+    var root = WINDOW ? window : {};
+    if (root.JS_SHA256_NO_WINDOW) {
+        WINDOW = false;
+    }
+    var WEB_WORKER = !WINDOW && typeof self === 'object';
+    var NODE_JS = !root.JS_SHA256_NO_NODE_JS && typeof process === 'object' && process.versions && process.versions.node;
+    if (NODE_JS) {
+        root = global;
+    } else if (WEB_WORKER) {
+        root = self;
+    }
+    var COMMON_JS = !root.JS_SHA256_NO_COMMON_JS && typeof module === 'object' && module.exports;
+    var AMD = typeof define === 'function' && define.amd;
+    var ARRAY_BUFFER = !root.JS_SHA256_NO_ARRAY_BUFFER && typeof ArrayBuffer !== 'undefined';
+    var HEX_CHARS = '0123456789abcdef'.split('');
+    var EXTRA = [-2147483648, 8388608, 32768, 128];
+    var SHIFT = [24, 16, 8, 0];
+    var K = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ];
+    var OUTPUT_TYPES = ['hex', 'array', 'digest', 'arrayBuffer'];
+
+    var blocks = [];
+
+    if (root.JS_SHA256_NO_NODE_JS || !Array.isArray) {
+        Array.isArray = function (obj) {
+            return Object.prototype.toString.call(obj) === '[object Array]';
+        };
+    }
+
+    if (ARRAY_BUFFER && (root.JS_SHA256_NO_ARRAY_BUFFER_IS_VIEW || !ArrayBuffer.isView)) {
+        ArrayBuffer.isView = function (obj) {
+            return typeof obj === 'object' && obj.buffer && obj.buffer.constructor === ArrayBuffer;
+        };
+    }
+
+    var createOutputMethod = function (outputType, is224) {
+        return function (message) {
+            return new Sha256(is224, true).update(message)[outputType]();
+        };
+    };
+
+    var createMethod = function (is224) {
+        var method = createOutputMethod('hex', is224);
+        if (NODE_JS) {
+            method = nodeWrap(method, is224);
+        }
+        method.create = function () {
+            return new Sha256(is224);
+        };
+        method.update = function (message) {
+            return method.create().update(message);
+        };
+        for (var i = 0; i < OUTPUT_TYPES.length; ++i) {
+            var type = OUTPUT_TYPES[i];
+            method[type] = createOutputMethod(type, is224);
+        }
+        return method;
+    };
+
+    var nodeWrap = function (method, is224) {
+        var crypto = require('crypto')
+        var Buffer = require('buffer').Buffer;
+        var algorithm = is224 ? 'sha224' : 'sha256';
+        var bufferFrom;
+        if (Buffer.from && !root.JS_SHA256_NO_BUFFER_FROM) {
+            bufferFrom = Buffer.from;
+        } else {
+            bufferFrom = function (message) {
+                return new Buffer(message);
+            };
+        }
+        var nodeMethod = function (message) {
+            if (typeof message === 'string') {
+                return crypto.createHash(algorithm).update(message, 'utf8').digest('hex');
+            } else {
+                if (message === null || message === undefined) {
+                    throw new Error(ERROR);
+                } else if (message.constructor === ArrayBuffer) {
+                    message = new Uint8Array(message);
+                }
+            }
+            if (Array.isArray(message) || ArrayBuffer.isView(message) ||
+                message.constructor === Buffer) {
+                return crypto.createHash(algorithm).update(bufferFrom(message)).digest('hex');
+            } else {
+                return method(message);
+            }
+        };
+        return nodeMethod;
+    };
+
+    var createHmacOutputMethod = function (outputType, is224) {
+        return function (key, message) {
+            return new HmacSha256(key, is224, true).update(message)[outputType]();
+        };
+    };
+
+    var createHmacMethod = function (is224) {
+        var method = createHmacOutputMethod('hex', is224);
+        method.create = function (key) {
+            return new HmacSha256(key, is224);
+        };
+        method.update = function (key, message) {
+            return method.create(key).update(message);
+        };
+        for (var i = 0; i < OUTPUT_TYPES.length; ++i) {
+            var type = OUTPUT_TYPES[i];
+            method[type] = createHmacOutputMethod(type, is224);
+        }
+        return method;
+    };
+
+    function Sha256(is224, sharedMemory) {
+        if (sharedMemory) {
+            blocks[0] = blocks[16] = blocks[1] = blocks[2] = blocks[3] =
+                blocks[4] = blocks[5] = blocks[6] = blocks[7] =
+                    blocks[8] = blocks[9] = blocks[10] = blocks[11] =
+                        blocks[12] = blocks[13] = blocks[14] = blocks[15] = 0;
+            this.blocks = blocks;
+        } else {
+            this.blocks = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        }
+
+        if (is224) {
+            this.h0 = 0xc1059ed8;
+            this.h1 = 0x367cd507;
+            this.h2 = 0x3070dd17;
+            this.h3 = 0xf70e5939;
+            this.h4 = 0xffc00b31;
+            this.h5 = 0x68581511;
+            this.h6 = 0x64f98fa7;
+            this.h7 = 0xbefa4fa4;
+        } else { // 256
+            this.h0 = 0x6a09e667;
+            this.h1 = 0xbb67ae85;
+            this.h2 = 0x3c6ef372;
+            this.h3 = 0xa54ff53a;
+            this.h4 = 0x510e527f;
+            this.h5 = 0x9b05688c;
+            this.h6 = 0x1f83d9ab;
+            this.h7 = 0x5be0cd19;
+        }
+
+        this.block = this.start = this.bytes = this.hBytes = 0;
+        this.finalized = this.hashed = false;
+        this.first = true;
+        this.is224 = is224;
+    }
+
+    Sha256.prototype.update = function (message) {
+        if (this.finalized) {
+            return;
+        }
+        var notString, type = typeof message;
+        if (type !== 'string') {
+            if (type === 'object') {
+                if (message === null) {
+                    throw new Error(ERROR);
+                } else if (ARRAY_BUFFER && message.constructor === ArrayBuffer) {
+                    message = new Uint8Array(message);
+                } else if (!Array.isArray(message)) {
+                    if (!ARRAY_BUFFER || !ArrayBuffer.isView(message)) {
+                        throw new Error(ERROR);
+                    }
+                }
+            } else {
+                throw new Error(ERROR);
+            }
+            notString = true;
+        }
+        var code, index = 0, i, length = message.length, blocks = this.blocks;
+        while (index < length) {
+            if (this.hashed) {
+                this.hashed = false;
+                blocks[0] = this.block;
+                this.block = blocks[16] = blocks[1] = blocks[2] = blocks[3] =
+                    blocks[4] = blocks[5] = blocks[6] = blocks[7] =
+                        blocks[8] = blocks[9] = blocks[10] = blocks[11] =
+                            blocks[12] = blocks[13] = blocks[14] = blocks[15] = 0;
+            }
+
+            if (notString) {
+                for (i = this.start; index < length && i < 64; ++index) {
+                    blocks[i >>> 2] |= message[index] << SHIFT[i++ & 3];
+                }
+            } else {
+                for (i = this.start; index < length && i < 64; ++index) {
+                    code = message.charCodeAt(index);
+                    if (code < 0x80) {
+                        blocks[i >>> 2] |= code << SHIFT[i++ & 3];
+                    } else if (code < 0x800) {
+                        blocks[i >>> 2] |= (0xc0 | (code >>> 6)) << SHIFT[i++ & 3];
+                        blocks[i >>> 2] |= (0x80 | (code & 0x3f)) << SHIFT[i++ & 3];
+                    } else if (code < 0xd800 || code >= 0xe000) {
+                        blocks[i >>> 2] |= (0xe0 | (code >>> 12)) << SHIFT[i++ & 3];
+                        blocks[i >>> 2] |= (0x80 | ((code >>> 6) & 0x3f)) << SHIFT[i++ & 3];
+                        blocks[i >>> 2] |= (0x80 | (code & 0x3f)) << SHIFT[i++ & 3];
+                    } else {
+                        code = 0x10000 + (((code & 0x3ff) << 10) | (message.charCodeAt(++index) & 0x3ff));
+                        blocks[i >>> 2] |= (0xf0 | (code >>> 18)) << SHIFT[i++ & 3];
+                        blocks[i >>> 2] |= (0x80 | ((code >>> 12) & 0x3f)) << SHIFT[i++ & 3];
+                        blocks[i >>> 2] |= (0x80 | ((code >>> 6) & 0x3f)) << SHIFT[i++ & 3];
+                        blocks[i >>> 2] |= (0x80 | (code & 0x3f)) << SHIFT[i++ & 3];
+                    }
+                }
+            }
+
+            this.lastByteIndex = i;
+            this.bytes += i - this.start;
+            if (i >= 64) {
+                this.block = blocks[16];
+                this.start = i - 64;
+                this.hash();
+                this.hashed = true;
+            } else {
+                this.start = i;
+            }
+        }
+        if (this.bytes > 4294967295) {
+            this.hBytes += this.bytes / 4294967296 << 0;
+            this.bytes = this.bytes % 4294967296;
+        }
+        return this;
+    };
+
+    Sha256.prototype.finalize = function () {
+        if (this.finalized) {
+            return;
+        }
+        this.finalized = true;
+        var blocks = this.blocks, i = this.lastByteIndex;
+        blocks[16] = this.block;
+        blocks[i >>> 2] |= EXTRA[i & 3];
+        this.block = blocks[16];
+        if (i >= 56) {
+            if (!this.hashed) {
+                this.hash();
+            }
+            blocks[0] = this.block;
+            blocks[16] = blocks[1] = blocks[2] = blocks[3] =
+                blocks[4] = blocks[5] = blocks[6] = blocks[7] =
+                    blocks[8] = blocks[9] = blocks[10] = blocks[11] =
+                        blocks[12] = blocks[13] = blocks[14] = blocks[15] = 0;
+        }
+        blocks[14] = this.hBytes << 3 | this.bytes >>> 29;
+        blocks[15] = this.bytes << 3;
+        this.hash();
+    };
+
+    Sha256.prototype.hash = function () {
+        var a = this.h0, b = this.h1, c = this.h2, d = this.h3, e = this.h4, f = this.h5, g = this.h6,
+            h = this.h7, blocks = this.blocks, j, s0, s1, maj, t1, t2, ch, ab, da, cd, bc;
+
+        for (j = 16; j < 64; ++j) {
+            // rightrotate
+            t1 = blocks[j - 15];
+            s0 = ((t1 >>> 7) | (t1 << 25)) ^ ((t1 >>> 18) | (t1 << 14)) ^ (t1 >>> 3);
+            t1 = blocks[j - 2];
+            s1 = ((t1 >>> 17) | (t1 << 15)) ^ ((t1 >>> 19) | (t1 << 13)) ^ (t1 >>> 10);
+            blocks[j] = blocks[j - 16] + s0 + blocks[j - 7] + s1 << 0;
+        }
+
+        bc = b & c;
+        for (j = 0; j < 64; j += 4) {
+            if (this.first) {
+                if (this.is224) {
+                    ab = 300032;
+                    t1 = blocks[0] - 1413257819;
+                    h = t1 - 150054599 << 0;
+                    d = t1 + 24177077 << 0;
+                } else {
+                    ab = 704751109;
+                    t1 = blocks[0] - 210244248;
+                    h = t1 - 1521486534 << 0;
+                    d = t1 + 143694565 << 0;
+                }
+                this.first = false;
+            } else {
+                s0 = ((a >>> 2) | (a << 30)) ^ ((a >>> 13) | (a << 19)) ^ ((a >>> 22) | (a << 10));
+                s1 = ((e >>> 6) | (e << 26)) ^ ((e >>> 11) | (e << 21)) ^ ((e >>> 25) | (e << 7));
+                ab = a & b;
+                maj = ab ^ (a & c) ^ bc;
+                ch = (e & f) ^ (~e & g);
+                t1 = h + s1 + ch + K[j] + blocks[j];
+                t2 = s0 + maj;
+                h = d + t1 << 0;
+                d = t1 + t2 << 0;
+            }
+            s0 = ((d >>> 2) | (d << 30)) ^ ((d >>> 13) | (d << 19)) ^ ((d >>> 22) | (d << 10));
+            s1 = ((h >>> 6) | (h << 26)) ^ ((h >>> 11) | (h << 21)) ^ ((h >>> 25) | (h << 7));
+            da = d & a;
+            maj = da ^ (d & b) ^ ab;
+            ch = (h & e) ^ (~h & f);
+            t1 = g + s1 + ch + K[j + 1] + blocks[j + 1];
+            t2 = s0 + maj;
+            g = c + t1 << 0;
+            c = t1 + t2 << 0;
+            s0 = ((c >>> 2) | (c << 30)) ^ ((c >>> 13) | (c << 19)) ^ ((c >>> 22) | (c << 10));
+            s1 = ((g >>> 6) | (g << 26)) ^ ((g >>> 11) | (g << 21)) ^ ((g >>> 25) | (g << 7));
+            cd = c & d;
+            maj = cd ^ (c & a) ^ da;
+            ch = (g & h) ^ (~g & e);
+            t1 = f + s1 + ch + K[j + 2] + blocks[j + 2];
+            t2 = s0 + maj;
+            f = b + t1 << 0;
+            b = t1 + t2 << 0;
+            s0 = ((b >>> 2) | (b << 30)) ^ ((b >>> 13) | (b << 19)) ^ ((b >>> 22) | (b << 10));
+            s1 = ((f >>> 6) | (f << 26)) ^ ((f >>> 11) | (f << 21)) ^ ((f >>> 25) | (f << 7));
+            bc = b & c;
+            maj = bc ^ (b & d) ^ cd;
+            ch = (f & g) ^ (~f & h);
+            t1 = e + s1 + ch + K[j + 3] + blocks[j + 3];
+            t2 = s0 + maj;
+            e = a + t1 << 0;
+            a = t1 + t2 << 0;
+            this.chromeBugWorkAround = true;
+        }
+
+        this.h0 = this.h0 + a << 0;
+        this.h1 = this.h1 + b << 0;
+        this.h2 = this.h2 + c << 0;
+        this.h3 = this.h3 + d << 0;
+        this.h4 = this.h4 + e << 0;
+        this.h5 = this.h5 + f << 0;
+        this.h6 = this.h6 + g << 0;
+        this.h7 = this.h7 + h << 0;
+    };
+
+    Sha256.prototype.hex = function () {
+        this.finalize();
+
+        var h0 = this.h0, h1 = this.h1, h2 = this.h2, h3 = this.h3, h4 = this.h4, h5 = this.h5,
+            h6 = this.h6, h7 = this.h7;
+
+        var hex = HEX_CHARS[(h0 >>> 28) & 0x0F] + HEX_CHARS[(h0 >>> 24) & 0x0F] +
+            HEX_CHARS[(h0 >>> 20) & 0x0F] + HEX_CHARS[(h0 >>> 16) & 0x0F] +
+            HEX_CHARS[(h0 >>> 12) & 0x0F] + HEX_CHARS[(h0 >>> 8) & 0x0F] +
+            HEX_CHARS[(h0 >>> 4) & 0x0F] + HEX_CHARS[h0 & 0x0F] +
+            HEX_CHARS[(h1 >>> 28) & 0x0F] + HEX_CHARS[(h1 >>> 24) & 0x0F] +
+            HEX_CHARS[(h1 >>> 20) & 0x0F] + HEX_CHARS[(h1 >>> 16) & 0x0F] +
+            HEX_CHARS[(h1 >>> 12) & 0x0F] + HEX_CHARS[(h1 >>> 8) & 0x0F] +
+            HEX_CHARS[(h1 >>> 4) & 0x0F] + HEX_CHARS[h1 & 0x0F] +
+            HEX_CHARS[(h2 >>> 28) & 0x0F] + HEX_CHARS[(h2 >>> 24) & 0x0F] +
+            HEX_CHARS[(h2 >>> 20) & 0x0F] + HEX_CHARS[(h2 >>> 16) & 0x0F] +
+            HEX_CHARS[(h2 >>> 12) & 0x0F] + HEX_CHARS[(h2 >>> 8) & 0x0F] +
+            HEX_CHARS[(h2 >>> 4) & 0x0F] + HEX_CHARS[h2 & 0x0F] +
+            HEX_CHARS[(h3 >>> 28) & 0x0F] + HEX_CHARS[(h3 >>> 24) & 0x0F] +
+            HEX_CHARS[(h3 >>> 20) & 0x0F] + HEX_CHARS[(h3 >>> 16) & 0x0F] +
+            HEX_CHARS[(h3 >>> 12) & 0x0F] + HEX_CHARS[(h3 >>> 8) & 0x0F] +
+            HEX_CHARS[(h3 >>> 4) & 0x0F] + HEX_CHARS[h3 & 0x0F] +
+            HEX_CHARS[(h4 >>> 28) & 0x0F] + HEX_CHARS[(h4 >>> 24) & 0x0F] +
+            HEX_CHARS[(h4 >>> 20) & 0x0F] + HEX_CHARS[(h4 >>> 16) & 0x0F] +
+            HEX_CHARS[(h4 >>> 12) & 0x0F] + HEX_CHARS[(h4 >>> 8) & 0x0F] +
+            HEX_CHARS[(h4 >>> 4) & 0x0F] + HEX_CHARS[h4 & 0x0F] +
+            HEX_CHARS[(h5 >>> 28) & 0x0F] + HEX_CHARS[(h5 >>> 24) & 0x0F] +
+            HEX_CHARS[(h5 >>> 20) & 0x0F] + HEX_CHARS[(h5 >>> 16) & 0x0F] +
+            HEX_CHARS[(h5 >>> 12) & 0x0F] + HEX_CHARS[(h5 >>> 8) & 0x0F] +
+            HEX_CHARS[(h5 >>> 4) & 0x0F] + HEX_CHARS[h5 & 0x0F] +
+            HEX_CHARS[(h6 >>> 28) & 0x0F] + HEX_CHARS[(h6 >>> 24) & 0x0F] +
+            HEX_CHARS[(h6 >>> 20) & 0x0F] + HEX_CHARS[(h6 >>> 16) & 0x0F] +
+            HEX_CHARS[(h6 >>> 12) & 0x0F] + HEX_CHARS[(h6 >>> 8) & 0x0F] +
+            HEX_CHARS[(h6 >>> 4) & 0x0F] + HEX_CHARS[h6 & 0x0F];
+        if (!this.is224) {
+            hex += HEX_CHARS[(h7 >>> 28) & 0x0F] + HEX_CHARS[(h7 >>> 24) & 0x0F] +
+                HEX_CHARS[(h7 >>> 20) & 0x0F] + HEX_CHARS[(h7 >>> 16) & 0x0F] +
+                HEX_CHARS[(h7 >>> 12) & 0x0F] + HEX_CHARS[(h7 >>> 8) & 0x0F] +
+                HEX_CHARS[(h7 >>> 4) & 0x0F] + HEX_CHARS[h7 & 0x0F];
+        }
+        return hex;
+    };
+
+    Sha256.prototype.toString = Sha256.prototype.hex;
+
+    Sha256.prototype.digest = function () {
+        this.finalize();
+
+        var h0 = this.h0, h1 = this.h1, h2 = this.h2, h3 = this.h3, h4 = this.h4, h5 = this.h5,
+            h6 = this.h6, h7 = this.h7;
+
+        var arr = [
+            (h0 >>> 24) & 0xFF, (h0 >>> 16) & 0xFF, (h0 >>> 8) & 0xFF, h0 & 0xFF,
+            (h1 >>> 24) & 0xFF, (h1 >>> 16) & 0xFF, (h1 >>> 8) & 0xFF, h1 & 0xFF,
+            (h2 >>> 24) & 0xFF, (h2 >>> 16) & 0xFF, (h2 >>> 8) & 0xFF, h2 & 0xFF,
+            (h3 >>> 24) & 0xFF, (h3 >>> 16) & 0xFF, (h3 >>> 8) & 0xFF, h3 & 0xFF,
+            (h4 >>> 24) & 0xFF, (h4 >>> 16) & 0xFF, (h4 >>> 8) & 0xFF, h4 & 0xFF,
+            (h5 >>> 24) & 0xFF, (h5 >>> 16) & 0xFF, (h5 >>> 8) & 0xFF, h5 & 0xFF,
+            (h6 >>> 24) & 0xFF, (h6 >>> 16) & 0xFF, (h6 >>> 8) & 0xFF, h6 & 0xFF
+        ];
+        if (!this.is224) {
+            arr.push((h7 >>> 24) & 0xFF, (h7 >>> 16) & 0xFF, (h7 >>> 8) & 0xFF, h7 & 0xFF);
+        }
+        return arr;
+    };
+
+    Sha256.prototype.array = Sha256.prototype.digest;
+
+    Sha256.prototype.arrayBuffer = function () {
+        this.finalize();
+
+        var buffer = new ArrayBuffer(this.is224 ? 28 : 32);
+        var dataView = new DataView(buffer);
+        dataView.setUint32(0, this.h0);
+        dataView.setUint32(4, this.h1);
+        dataView.setUint32(8, this.h2);
+        dataView.setUint32(12, this.h3);
+        dataView.setUint32(16, this.h4);
+        dataView.setUint32(20, this.h5);
+        dataView.setUint32(24, this.h6);
+        if (!this.is224) {
+            dataView.setUint32(28, this.h7);
+        }
+        return buffer;
+    };
+
+    function HmacSha256(key, is224, sharedMemory) {
+        var i, type = typeof key;
+        if (type === 'string') {
+            var bytes = [], length = key.length, index = 0, code;
+            for (i = 0; i < length; ++i) {
+                code = key.charCodeAt(i);
+                if (code < 0x80) {
+                    bytes[index++] = code;
+                } else if (code < 0x800) {
+                    bytes[index++] = (0xc0 | (code >>> 6));
+                    bytes[index++] = (0x80 | (code & 0x3f));
+                } else if (code < 0xd800 || code >= 0xe000) {
+                    bytes[index++] = (0xe0 | (code >>> 12));
+                    bytes[index++] = (0x80 | ((code >>> 6) & 0x3f));
+                    bytes[index++] = (0x80 | (code & 0x3f));
+                } else {
+                    code = 0x10000 + (((code & 0x3ff) << 10) | (key.charCodeAt(++i) & 0x3ff));
+                    bytes[index++] = (0xf0 | (code >>> 18));
+                    bytes[index++] = (0x80 | ((code >>> 12) & 0x3f));
+                    bytes[index++] = (0x80 | ((code >>> 6) & 0x3f));
+                    bytes[index++] = (0x80 | (code & 0x3f));
+                }
+            }
+            key = bytes;
+        } else {
+            if (type === 'object') {
+                if (key === null) {
+                    throw new Error(ERROR);
+                } else if (ARRAY_BUFFER && key.constructor === ArrayBuffer) {
+                    key = new Uint8Array(key);
+                } else if (!Array.isArray(key)) {
+                    if (!ARRAY_BUFFER || !ArrayBuffer.isView(key)) {
+                        throw new Error(ERROR);
+                    }
+                }
+            } else {
+                throw new Error(ERROR);
+            }
+        }
+
+        if (key.length > 64) {
+            key = (new Sha256(is224, true)).update(key).array();
+        }
+
+        var oKeyPad = [], iKeyPad = [];
+        for (i = 0; i < 64; ++i) {
+            var b = key[i] || 0;
+            oKeyPad[i] = 0x5c ^ b;
+            iKeyPad[i] = 0x36 ^ b;
+        }
+
+        Sha256.call(this, is224, sharedMemory);
+
+        this.update(iKeyPad);
+        this.oKeyPad = oKeyPad;
+        this.inner = true;
+        this.sharedMemory = sharedMemory;
+    }
+    HmacSha256.prototype = new Sha256();
+
+    HmacSha256.prototype.finalize = function () {
+        Sha256.prototype.finalize.call(this);
+        if (this.inner) {
+            this.inner = false;
+            var innerHash = this.array();
+            Sha256.call(this, this.is224, this.sharedMemory);
+            this.update(this.oKeyPad);
+            this.update(innerHash);
+            Sha256.prototype.finalize.call(this);
+        }
+    };
+
+    var exports = createMethod();
+    exports.sha256 = exports;
+    exports.sha224 = createMethod(true);
+    exports.sha256.hmac = createHmacMethod();
+    exports.sha224.hmac = createHmacMethod(true);
+
+    if (COMMON_JS) {
+        module.exports = exports;
+    } else {
+        root.sha256 = exports.sha256;
+        root.sha224 = exports.sha224;
+        if (AMD) {
+            define(function () {
+                return exports;
+            });
+        }
+    }
+})();
