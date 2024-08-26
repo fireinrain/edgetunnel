@@ -21,6 +21,7 @@ export default {
      * @returns {Promise<Response>}
      */
     async fetch(request, env, ctx) {
+        const KVNamespace = env.V2BoardXUUIDS
         try {
             userID = env.UUID || userID;
             proxyIP = env.PROXYIP || proxyIP;
@@ -40,10 +41,25 @@ export default {
                         });
                     }
                     default:
-                        return new Response('Not found', { status: 404 });
+                         //remove / from pathname
+                        const uuidStr = url.pathname.substring(1);
+                        //check if a valid uuid
+
+                        if (!isValidUUID(uuidStr)) {
+                            return new Response('Not found', {status: 404});
+                        }
+                        //check if user have a valid v2board subscription after sub expiration within 16days
+                        //you need bind a kv namespace to this worker, see cloudflare dash
+                        const validUserExpiredTime = await KVNamespace.get(uuidStr);
+                        if (!validUserExpiredTime) {
+                            return new Response('You dont have permission to use,due to subscription expired for more than 12 days', {status: 401});
+
+                        } else {
+                            return new Response('You are valid for subscription, just enjoy it :)', {status: 200})
+                        }
                 }
             } else {
-                return await vlessOverWSHandler(request);
+                return await vlessOverWSHandler(request,KVNamespace);
             }
         } catch (err) {
             /** @type {Error} */ let e = err;
@@ -59,7 +75,7 @@ export default {
  *
  * @param {import("@cloudflare/workers-types").Request} request
  */
-async function vlessOverWSHandler(request) {
+async function vlessOverWSHandler(request,kvNamespace) {
 
     /** @type {import("@cloudflare/workers-types").WebSocket[]} */
         // @ts-ignore
@@ -98,6 +114,7 @@ async function vlessOverWSHandler(request) {
             }
 
             const {
+                realUserid,
                 hasError,
                 message,
                 portRemote = 443,
@@ -115,6 +132,17 @@ async function vlessOverWSHandler(request) {
                 // webSocket.close(1000, message);
                 return;
             }
+            if (realUserid !== userID) {
+                let validUser = await kvNamespace.get(realUserid);
+                if (!validUser) {
+                    // controller.error(message);
+                    throw new Error(message); // cf seems has bug, controller.error will not end stream
+                    // webSocket.close(1000, message);
+                    return;
+                }
+            }
+            //check if user in cloudflare kv
+            console.log("当前用户: ", realUserid)
             // if UDP but port not DNS port, close it
             if (isUDP) {
                 if (portRemote === 53) {
@@ -287,17 +315,19 @@ function processVlessHeader(
         };
     }
     const version = new Uint8Array(vlessBuffer.slice(0, 1));
-    let isValidUser = false;
+    let isValidUser = true;
     let isUDP = false;
-    if (stringify(new Uint8Array(vlessBuffer.slice(1, 17))) === userID) {
-        isValidUser = true;
-    }
-    if (!isValidUser) {
-        return {
-            hasError: true,
-            message: 'invalid user',
-        };
-    }
+    // if (stringify(new Uint8Array(vlessBuffer.slice(1, 17))) === userID) {
+    //     isValidUser = true;
+    // }
+    const newUserId = stringify(new Uint8Array(vlessBuffer.slice(1, 17)))
+    // 通过原本的uuid检测
+    // if (!isValidUser) {
+    //     return {
+    //         hasError: true,
+    //         message: 'invalid user',
+    //     };
+    // }
 
     const optLength = new Uint8Array(vlessBuffer.slice(17, 18))[0];
     //skip opt for now
@@ -378,6 +408,7 @@ function processVlessHeader(
     }
 
     return {
+        realUserid: newUserId,
         hasError: false,
         addressRemote: addressValue,
         addressType,
