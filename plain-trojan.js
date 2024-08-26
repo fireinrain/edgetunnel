@@ -1,24 +1,38 @@
 // src/worker.js
 import { connect } from "cloudflare:sockets";
 
-let Pswd = 'LeslieAlexanderTrojan88c8292f-d679-41a6-913e-335546702bdf';
-const proxyIPs = ["cdn-all.xn--b6gac.eu.org"]; // https://github.com/HappyLeslieAlexander/Cloudflare_Trojan/blob/main/proxyip.txt 中的地址也可以
-let hostnames = ['leslieblog.top'];
+let userID = '88c8292f-d679-41a6-913e-335546702bdf';
 
 let sha224Password ;
-let proxyIP = proxyIPs[Math.floor(Math.random() * proxyIPs.length)];
+let proxyIP = '';
+
+
+/**
+ * This is not real UUID validation
+ * @param {string} uuid
+ */
+function isValidUUID(uuid) {
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[4][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    return uuidRegex.test(uuid);
+}
+
 const worker_default = {
     /**
      * @param {import("@cloudflare/workers-types").Request} request
-     * @param {proxyip: string, pswd: string} env
+     * @param {proxyip: string, userID: string} env
      * @param {import("@cloudflare/workers-types").ExecutionContext} ctx
      * @returns {Promise<Response>}
      */
     async fetch(request, env, ctx) {
+        const KVNamespace = env.V2BoardXUUIDS
+
         try {
-            proxyIP = env.proxyip || proxyIP;
-            Pswd = env.pswd || Pswd
-            sha224Password = sha256.sha224(Pswd);
+            proxyIP = env.PROXYIP || proxyIP;
+            userID = env.UUID || userID
+            sha224Password = sha256.sha224(userID);
+            if (proxyIP.includes(',')) {
+                proxyIP = proxyIP.split(",")[Math.floor(Math.random() * proxyIP.split(",").length)];
+            }
             const upgradeHeader = request.headers.get("Upgrade");
             if (!upgradeHeader || upgradeHeader !== 'websocket') {
                 const url = new URL(request.url);
@@ -31,8 +45,8 @@ const worker_default = {
                             },
                         });
 
-                    case `/${Pswd}`: {
-                        const trojanConfig = gettrojanConfig(Pswd, request.headers.get('Host'));
+                    case `/${userID}`: {
+                        const trojanConfig = gettrojanConfig(userID, request.headers.get('Host'));
                         return new Response(`${trojanConfig}`, {
                             status: 200,
                             headers: {
@@ -41,35 +55,52 @@ const worker_default = {
                         });
                     }
                     default:
-                        // return new Response('Not found', { status: 404 });
-                        // For any other path, reverse proxy to 'ramdom website' and return the original response, caching it in the process
-                        const randomHostname = hostnames[Math.floor(Math.random() * hostnames.length)];
-                        const newHeaders = new Headers(request.headers);
-                        newHeaders.set('cf-connecting-ip', '1.2.3.4');
-                        newHeaders.set('x-forwarded-for', '1.2.3.4');
-                        newHeaders.set('x-real-ip', '1.2.3.4');
-                        newHeaders.set('referer', 'https://www.google.com/search?q=edtunnel');
-                        // Use fetch to proxy the request to 15 different domains
-                        const proxyUrl = 'https://' + randomHostname + url.pathname + url.search;
-                        let modifiedRequest = new Request(proxyUrl, {
-                            method: request.method,
-                            headers: newHeaders,
-                            body: request.body,
-                            redirect: 'manual',
-                        });
-                        const proxyResponse = await fetch(modifiedRequest, { redirect: 'manual' });
-                        // Check for 302 or 301 redirect status and return an error response
-                        if ([301, 302].includes(proxyResponse.status)) {
-                            return new Response(`Redirects to ${randomHostname} are not allowed.`, {
-                                status: 403,
-                                statusText: 'Forbidden',
-                            });
+                        // // return new Response('Not found', { status: 404 });
+                        // // For any other path, reverse proxy to 'ramdom website' and return the original response, caching it in the process
+                        // const randomHostname = hostnames[Math.floor(Math.random() * hostnames.length)];
+                        // const newHeaders = new Headers(request.headers);
+                        // newHeaders.set('cf-connecting-ip', '1.2.3.4');
+                        // newHeaders.set('x-forwarded-for', '1.2.3.4');
+                        // newHeaders.set('x-real-ip', '1.2.3.4');
+                        // newHeaders.set('referer', 'https://www.google.com/search?q=edtunnel');
+                        // // Use fetch to proxy the request to 15 different domains
+                        // const proxyUrl = 'https://' + randomHostname + url.pathname + url.search;
+                        // let modifiedRequest = new Request(proxyUrl, {
+                        //     method: request.method,
+                        //     headers: newHeaders,
+                        //     body: request.body,
+                        //     redirect: 'manual',
+                        // });
+                        // const proxyResponse = await fetch(modifiedRequest, { redirect: 'manual' });
+                        // // Check for 302 or 301 redirect status and return an error response
+                        // if ([301, 302].includes(proxyResponse.status)) {
+                        //     return new Response(`Redirects to ${randomHostname} are not allowed.`, {
+                        //         status: 403,
+                        //         statusText: 'Forbidden',
+                        //     });
+                        // }
+                        // // Return the response from the proxy server
+                        // return proxyResponse;
+
+                        //remove / from pathname
+                        const uuidStr = url.pathname.substring(1);
+                        //check if a valid uuid
+
+                        if (!isValidUUID(uuidStr)) {
+                            return new Response('Not found', {status: 404});
                         }
-                        // Return the response from the proxy server
-                        return proxyResponse;
+                        //check if user have a valid v2board subscription after sub expiration within 16days
+                        //you need bind a kv namespace to this worker, see cloudflare dash
+                        const validUserExpiredTime = await KVNamespace.get(uuidStr);
+                        if (!validUserExpiredTime) {
+                            return new Response('You dont have permission to use,due to subscription expired for more than 12 days', {status: 401});
+
+                        } else {
+                            return new Response('You are valid for subscription, just enjoy it :)', {status: 200})
+                        }
                 }
             } else {
-                return await trojanOverWSHandler(request);
+                return await trojanOverWSHandler(request,KVNamespace);
             }
         } catch (err) {
             /** @type {Error} */ let e = err;
@@ -78,7 +109,7 @@ const worker_default = {
     },
 };
 
-async function trojanOverWSHandler(request) {
+async function trojanOverWSHandler(request,kvNameSpace) {
     const webSocketPair = new WebSocketPair();
     const [client, webSocket] = Object.values(webSocketPair);
     webSocket.accept();
@@ -151,6 +182,8 @@ async function parseTrojanHeader(buffer) {
     }
     const password = new TextDecoder().decode(buffer.slice(0, crLfIndex));
     if (password !== sha224Password) {
+        //TODO 判断是否存在KEY
+        //需要配合adapter定时把sha224(uuid):到期时间 设置到kvnamespace
         return {
             hasError: true,
             message: "invalid password"
