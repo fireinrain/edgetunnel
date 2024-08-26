@@ -25,6 +25,9 @@ export default {
         try {
             userID = env.UUID || userID;
             proxyIP = env.PROXYIP || proxyIP;
+            if (proxyIP.includes(',')){
+                proxyIP = proxyIP.split(",")[Math.floor(Math.random() * proxyIP.split(",").length)];
+            }
             const upgradeHeader = request.headers.get('Upgrade');
             if (!upgradeHeader || upgradeHeader !== 'websocket') {
                 const url = new URL(request.url);
